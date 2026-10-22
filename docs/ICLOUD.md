@@ -3,8 +3,11 @@
 Cloud sync is **off by default**. The inherited coordinator uploads whole,
 verified completed save snapshots quietly and imports remote progress only
 before game boot. Local saves remain available without CloudKit setup.
-**A real Smash save upload and two-device handoff have not yet been verified.**
-Do not infer them from the Odyssey port's earlier tests or from successful signing.
+**The first real iPad Smash save upload is verified in CloudKit Development.**
+Its five committed files match independent device backups and the snapshot whose
+SHA-256 digest CloudKit acknowledged. Cloud restore and a two-device handoff
+have not yet been verified. Signing and the Odyssey port's earlier tests do not
+establish those remaining results.
 
 ## Your own container
 
@@ -50,8 +53,12 @@ conflict choices. A cloud restore never overwrites a mounted live save.
 The Smash profile requires `save_data/system_data.bin` before publishing a
 progress snapshot; the path comes from the original executable. A disposable
 Mac match produced the real five-file save set, which the production archive
-codec captured and restored with an identical digest. Completed-save upload,
-account/network behavior and physical-device handoffs remain unverified.
+codec captured and restored with an identical digest. The first iPad boot then
+created the real five-file, 8,262,840-byte set and uploaded its completed snapshot.
+Independent device copies and the immutable committed snapshot match byte for
+byte; the upload receipt acknowledges the same local, base and remote digest.
+Cloud restore, physical account/network/retry behavior and device handoffs remain
+unverified.
 
 Play on one device at a time. Save, wait for acknowledgement, close it, then
 switch. iOS controls background execution and networking; an immediate force-close

@@ -106,19 +106,36 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   deferred-import and composite-lifetime fixes and regenerated format-2 catalog.
   The rebuilt 36 GiB-host package also passes signing with an exact-app
   Extended Virtual Addressing, Increased Memory Limit and CloudKit profile.
-  That signature does not establish installation or gameplay; those physical
-  checks remain pending.
+  That build subsequently installed on a physical M5 iPad Pro and boots through
+  SDK/native-module initialization and save creation. Its first display submissions
+  fail with a Metal 4 GPU address fault before game-shader initialization. This
+  is a physical rendering blocker, not a successful gameplay result. The display
+  path could register a lazily created source texture without committing its
+  residency before submission; it now commits through the existing residency
+  mutex. Independent review found no new lock-order or lifetime change. A clean
+  physical comparison is still required to establish causation and recovery.
+  The corrected source passes a new 85-second Mac Kirby/Fox match with movement,
+  item effects and damage; there are no reported rendering, pipeline-link,
+  unresolved-call or descriptor-pool errors, and all producer identities remain
+  unchanged. The corrected iOS app passes compilation and resource validation.
+  These checks do not replace the pending physical comparison.
 - A real disposable Mac match created a five-file save; production save-archive
   capture, encode, decode and restore preserved its exact digest in a new
   private directory. This validates that actual file set and codec, not iCloud
   upload or a two-device handoff.
+- The first physical iPad boot created five committed save files totalling
+  8,262,840 bytes. Two independent device copies match each other and the
+  immutable committed snapshot byte for byte. CloudKit Development acknowledged
+  one successful upload with equal local, base and remote SHA-256 digests. This
+  proves that first completed-save upload, not restore or a two-device handoff.
 
 ## What remains unverified
 
 Physical iPad gameplay, a complete two-controller match, per-player feedback
 feel, long sessions, thermal/memory behavior, all fighters/stages/modes and
-end-to-end Smash save synchronization remain unverified. Cloud snapshot capture
-must be checked against actual Smash commits and both handoff directions.
+Smash cloud restore and both device-handoff directions remain unverified.
+The first completed-save upload is verified separately above; physical retry,
+account-change and foreground/background behavior still need testing.
 
 The current composition is 16:9. Corrected native iPad/iPhone camera/HUD layouts
 are not implemented; borders are expected on other screen shapes. Frame

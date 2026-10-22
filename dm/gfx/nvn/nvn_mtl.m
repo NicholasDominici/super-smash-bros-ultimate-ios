@@ -7296,6 +7296,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
+    // The present thread can create/register its source texture lazily. Publish
+    // those residency additions before this queue submission can read them.
+    res_commit();
     [g_q4 commit:buffers count:1 options:o];
     if (target_ts > 0) {
         static double leads[300], e2e[300];   // e2e: game enqueue -> system-scheduled present (including the time waiting in the queue for the display-link callback), the full span of input latency that our side can read

@@ -7,12 +7,13 @@ The game code is rewritten on your Mac and signed into the app; there is no
 runtime JIT or jailbreak requirement.
 
 **This is a bring-up project.** Native Mac tests demonstrate movement, jumps,
-attacks, CPU combat, damage and knockouts. The latest Kirby/Donkey Kong combat
-run reported no rendering errors or missing shader keys. One known geometry
-shader remains unsupported. Physical iPad gameplay,
-two-controller matches, controller feel, sustained performance and Smash iCloud
-handoffs have not yet been verified. Read [the current limits](docs/VALIDATION.md)
-before spending time on a build.
+attacks, CPU combat, damage and knockouts. The signed iPad app installs, boots
+and uploads its first committed save to iCloud. Its first display submissions
+hit a GPU address fault, so physical gameplay is not yet qualified. A display
+residency fix is implemented; its physical comparison remains pending. One known
+geometry shader remains unsupported. Two-controller matches, controller feel,
+sustained performance and iCloud handoffs still need device tests. Read
+[the current limits](docs/VALIDATION.md) before spending time on a build.
 
 You provide your own **base-game NSP or XCI, update 13.0.5 NSP, and console
 keys**. This repository contains source, tools and metadata. It contains no
