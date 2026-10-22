@@ -51,6 +51,11 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   proportions and adjusted timer/damage panels. The generic touch overlay
   overlaps parts of the timer and left portrait. This verifies one battle
   layout, not every camera state, sustained frame rate or two physical players.
+  The match completes to the results screen without a crash, but reports the
+  known texture-ID-288 cube-versus-2D fallback. This is bounded layout evidence,
+  not a clean rendering acceptance result. Its completed save matches the local
+  immutable journal and an acknowledged iCloud upload; cross-device import is
+  still untested.
   The initial launch also displayed opening/tutorial video.
   A later tutorial-cleanup attempt after a 43-second debugger pause stopped at
   a null owned vertex-buffer resource in a Mesh destructor. Its generation
