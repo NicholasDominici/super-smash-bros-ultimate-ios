@@ -7,12 +7,15 @@ The game code is rewritten on your Mac and signed into the app; there is no
 runtime JIT or jailbreak requirement.
 
 **This is an experimental port.** A player has played it successfully on an M5
-iPad Pro, and actual completed saves have uploaded to iCloud. Clean menu
-rendering also works with Metal validation and screenshot diagnostics disabled.
+iPad Pro, and actual completed saves have uploaded to iCloud. Menus and a 4:3
+Kirby/Donkey Kong match render with Metal validation and screenshot diagnostics
+disabled.
 Some scene transitions can trigger a Metal texture-view assertion, which is
-under investigation. First-use shader compilation causes noticeable pauses; learned pipeline recipes
-are retained and preloaded on later launches. Intro-movie playback is still
-unreliable, and one known geometry shader remains unsupported. Two-controller
+under investigation. First-use shader compilation causes noticeable pauses;
+learned pipeline recipes are retained and preloaded on later launches. A player
+reported a same-content repeat was much smoother, but unseen content can still
+introduce compilation pauses. Intro-movie playback and late tutorial cleanup
+remain unreliable, and one known geometry shader remains unsupported. Two-controller
 matches, controller feel, sustained performance and iCloud handoffs still need
 device tests. Read
 [the current limits](docs/VALIDATION.md) before spending time on a build.
@@ -50,8 +53,10 @@ physical gameplay testing. [Controller details](docs/CONTROLLERS.md) and
 The default build preserves the game's **16:9 composition**. Use
 `--display-aspect 4:3` for the corrected iPad camera, HUD, menus and clipping.
 It prepares private copies of the exact US-English resources and keeps the
-current rendering pixel budget. This option is undergoing physical validation;
-it does not request full display-pixel rendering. See [NATIVE_ASPECT.md](docs/NATIVE_ASPECT.md).
+current rendering pixel budget. An installed M5 iPad Pro build renders full-screen
+4:3 menus and a Kirby/Donkey Kong match on Skyworld with normal proportions and
+an adjusted HUD. Other stages and modes still need layout checks. This option
+does not request full display-pixel rendering. See [NATIVE_ASPECT.md](docs/NATIVE_ASPECT.md).
 Stable 60/120 FPS on a particular device is not guaranteed.
 
 Local progress lives in the app's `Documents/save` folder, accessible through
@@ -59,6 +64,8 @@ Files or Finder file sharing. Save in-game, fully close the app and back up that
 folder before an update. Keep the same bundle ID and signing team. Deleting the
 app removes its local container. The build tool does not install anything; the
 separate signing tool installs only when you pass `--install`.
+Also preserve `Documents/pso_user.tsv`, the learned pipeline recipe list used
+to prepare previously encountered shaders on later launches.
 
 Cloud sync is **off by default** and experimental for Smash. It captures completed
 save commits, publishes whole verified snapshots and imports only before game

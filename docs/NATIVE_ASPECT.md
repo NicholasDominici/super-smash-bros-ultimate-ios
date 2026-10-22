@@ -31,7 +31,16 @@ values and slopes, single-frame compression, packaged-stream checks and clone
 preservation. Private canonical validation reverses every declared asset edit
 to its original archive identity and recomputes the transform. These checks do
 not establish physical appearance across all stages, modes or languages.
-The new layout is undergoing physical validation; keep US-English selected.
+The signed build has been installed on an M5 iPad Pro. Its normal renderer logs
+a full 2752 × 2064 viewport, a 1920 × 1080 raster and the corrected 4:3 logical
+aspect. Physical captures show the Smash menu and a Kirby/Donkey Kong match on
+Skyworld filling the display with natural proportions. The battle timer and
+damage panels use the adjusted HUD placement. This clean launch used scripted
+UI input, with no debugger, graphics validation or internal screenshot readbacks.
+The generic touch overlay can overlap parts of the timer and left damage portrait.
+Its 3,067 learned pipeline recipes and all five save files were verified
+byte-for-byte across the update. These bounded checks do not qualify other
+stages, modes or every camera state. Keep US-English selected.
 
 Primary camera research: [Fl4sh9174's aspect-ratio research](https://github.com/Fl4sh9174/Switch-Emulator-Ultrawide-FPS-Mods).
 The implementation independently gates the supplied 13.0.5 build and does not

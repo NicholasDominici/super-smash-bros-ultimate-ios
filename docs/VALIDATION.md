@@ -22,6 +22,16 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   524 render pipelines and four compute pipelines. This establishes cache
   persistence and warm-up, not elimination of stutter across all stages or
   fighters. Keep `pso_user.tsv` when updating or comparing runs.
+- In a later clean run, the player reported that repeating the same stage and
+  fighters was much smoother. The log preloads 2,547 learned recipes: 1,393
+  libraries, 1,147 render pipelines and seven compute pipelines in 724 ms.
+  Its final two measured windows cover 600 on-screen observations with no
+  reported drops or discards, on-screen p99 of 16.67 ms and GPU p95 around
+  5.6 ms. The log has no exact battle/action markers, so these samples are not
+  a numerical matched comparison. New content still incurs first-use pipeline
+  work. An explicit background/resume gap is excluded from active-play timing.
+  This log was copied before a later debugger attachment; debugger activity
+  is not included in the clean performance evidence.
 - The optional 4:3 preparation passes all 362 admitted US-English primary
   archive transforms and a private canonical check of 1,752 changed fields.
   An 85-second Mac preflight reaches a Kirby/Mario match with the corrected
@@ -30,6 +40,27 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   unchanged. It has no pipeline-link, unresolved-call or command-pool errors,
   but reports the previously known cube-versus-2D binding fallback. It is not
   a clean rendering acceptance result or physical iPad layout proof.
+- The signed 4:3 build is now installed on the M5 iPad Pro. All five save files
+  and 3,067 learned pipeline recipes survived the update byte-for-byte. A normal
+  renderer launch reports a full 2752 × 2064 viewport and unchanged 1920 × 1080
+  raster. With an early intro skip and no debugger, Metal validation, residency
+  diagnostics or internal screenshot readbacks, the physical Smash menu fills
+  the display with normal UI proportions. A second clean launch follows the
+  normal menus into a Kirby/Donkey Kong match on Skyworld using scripted UI
+  input. Physical captures show a full-frame battle view, natural fighter/stage
+  proportions and adjusted timer/damage panels. The generic touch overlay
+  overlaps parts of the timer and left portrait. This verifies one battle
+  layout, not every camera state, sustained frame rate or two physical players.
+  The initial launch also displayed opening/tutorial video.
+  A later tutorial-cleanup attempt after a 43-second debugger pause stopped at
+  a null owned vertex-buffer resource in a Mesh destructor. Its generation
+  token still admitted destruction. The operation that zeroed that resource
+  is unproven; this is a separate diagnostic path from the cube assertion below.
+  Clean early-skip launches reach menus and battle without that stop. A separate
+  frozen Mac replay, without a debugger or internal readbacks, also crashes
+  after a late tutorial skip, at a different allocator instruction. That
+  establishes a normal-time Mac cleanup failure, not an identical iPad fault
+  signature or a proven shared cause. Do not claim either cleanup path is fixed.
 - A later clean iPad session reaches a Metal cube-view assertion during a
   scene transition. The crash report matches the installed app's binary UUID
   and identifies the sampling-view constructor in `tex_by_id`. The actual
