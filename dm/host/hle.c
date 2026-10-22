@@ -55,7 +55,8 @@ void stubs_report(void) { LOG("stubs=%u", g_nstub); }
 // The rewriter replaces every svc #n / mrs cntpct with a call to dm_gate; here we remember, by gate block return point (absolute address), what it originally was.
 // Lookup: open-addressing hash, one hit (it used to do module_of + a linear compare over 110 entries on every gate call, keyed by in-module offset, which would collide across modules).
 enum { G_SVC, G_CNTPCT, G_CNTVCT, G_OBS };
-// Observation gates (inserted offline from the rewriter's OBS table): number → read-only callback; with no callback attached the gate returns after one pass in and out
+// Observation gates (inserted offline from the rewriter's OBS table): number
+// to register-preserving callback; without a callback the gate simply returns.
 typedef void (*obs_fn)(const uint64_t *regs);
 static _Atomic(obs_fn) g_obs_fn[OBS_MAX];
 static _Atomic unsigned g_obs_count[OBS_MAX];

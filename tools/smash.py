@@ -40,6 +40,7 @@ SLOT_KINDS = {'cbuf', 'samp', 'samp_tex', 'tex', 'img', 'tbuf', 'sbuf', 'ubo_ptr
 CAPTURE_SOURCE_REQUIRED = {'dm/host/Makefile', 'dm/host/main.c', 'dm/host/loader.c', 'dm/host/hle.c',
                            'dm/host/hle_hid.c', 'dm/gfx/nvn/hle_nvn.c', 'dm/gfx/nvn/nvn_mtl.m',
                            'dm/tools/patch_nso.py', 'dm/tools/a64_tables.py', 'dm/tools/a64_observers.py', 'dm/tools/smash_address_space.py',
+                           'dm/tools/smash_aspect.py', 'dm/tools/smash_aspect_ui.py',
                            'dm/gfx/metal/Makefile', 'dm/games/game.py'}
 MENU_CAPTURE_SCRIPT = ','.join(f'{second}:A' for second in range(5, 30, 3))
 # Register-all can change menu timing. Keep confirming before selecting a fighter;
@@ -132,13 +133,16 @@ def verify_extraction(source: Path) -> dict:
     return {'modules': record, 'archive_bytes': arc.stat().st_size, 'nrr_sha256': sorted(sha(p) for p in nrrs)}
 
 
-def make_profile(work: Path, cloud: str, frame_generation: bool) -> Path:
+def make_profile(work: Path, cloud: str, frame_generation: bool, display_aspect: str = '16:9') -> Path:
     """Make mutable private tables; never regenerate the public profile in place."""
+    if display_aspect not in ('16:9', '4:3'):
+        raise ValueError('Smash display aspect must be 16:9 or 4:3')
     target = work / 'profiles' / TITLE
     shutil.copytree(REPO / 'dm/games' / TITLE, target)
     path = target / 'game.tsv'
     text = re.sub(r'^cloud_container\t.*\n?', '', path.read_text(), flags=re.M)
     text = re.sub(r'^frame_generation\t.*$', 'frame_generation\t' + ('2x' if frame_generation else 'off'), text, flags=re.M)
+    text = re.sub(r'^display_aspect\t.*$', 'display_aspect\t' + display_aspect, text, flags=re.M)
     if not re.search(r'^extended_virtual_addressing\ton$', text, re.M):
         raise ValueError('Smash requires the Extended Virtual Addressing profile capability')
     if cloud:
@@ -147,6 +151,57 @@ def make_profile(work: Path, cloud: str, frame_generation: bool) -> Path:
         text += '\ncloud_container\t' + cloud + '\n'
     path.write_text(text)
     return target
+
+
+def _regular_display_trees(*trees: Path) -> None:
+    """Reject linked or special resources before following a tree during cloning."""
+    for tree in trees:
+        if tree.is_symlink() or not tree.is_dir():
+            raise ValueError('Display inputs must be regular directories: ' + str(tree))
+        for path in tree.rglob('*'):
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise ValueError('Unsupported display input entry: ' + str(path))
+
+
+def merge_display_romfs(source: Path, prepared_overlay: Path, work: Path) -> Path:
+    """Merge the admitted archive over a complete independent RomFS clone."""
+    from sign_install import clone_app
+    _regular_display_trees(source, prepared_overlay)
+    if {p.name for p in prepared_overlay.iterdir()} != {'data.arc'}:
+        raise ValueError('Display overlay must contain exactly data.arc')
+    regular(prepared_overlay / 'data.arc')
+    romfs = work / 'display-romfs'
+    clone_app(source, romfs)
+    overlay = work / 'display-overlay-copy'
+    clone_app(prepared_overlay, overlay)
+    os.replace(overlay / 'data.arc', romfs / 'data.arc')
+    overlay.rmdir()
+    return romfs
+
+
+def prepare_display(source: Path, rewritten: Path, work: Path, env: dict,
+                    display_aspect: str) -> tuple[Path, Path, Path | None]:
+    """Prepare matching private camera/UI assets without changing reused caches."""
+    if display_aspect == '16:9':
+        return rewritten, source / 'RomFS', None
+    if display_aspect != '4:3':
+        raise ValueError('Smash display aspect must be 16:9 or 4:3')
+    from sign_install import clone_app
+    _regular_display_trees(rewritten, source / 'RomFS')
+    # Reused 16:9 caches may predate the scoped UI gates. Regenerate only main
+    # in our own clone; all 98 catalogued NROs and the input cache stay intact.
+    base = work / 'display-rewrite-base'
+    clone_app(rewritten, base)
+    run([sys.executable, REPO / 'dm/tools/patch_nso.py', source / 'ExeFS/main', base, 'main'],
+        work, 'display-rewrite-main', env)
+    sys.path.insert(0, str(REPO / 'dm/tools'))
+    from smash_aspect import prepare
+    prepared = prepare(source / 'ExeFS/main', base, source / 'RomFS/data.arc', work / 'display-aspect')
+    # Keep every original RomFS entry, including the complete .nrr directory.
+    # Both trees are private APFS clones. Replacing the cloned archive cannot
+    # mutate either the original archive or the helper's admitted output.
+    romfs = merge_display_romfs(source / 'RomFS', prepared.romfs, work)
+    return prepared.rewritten, romfs, prepared.receipt
 
 
 def extract_packages(base: Path, update: Path, keys: Path, work: Path, env: dict) -> Path:
@@ -392,9 +447,15 @@ def validate_shaders(profile: Path, ios_root: Path, manifest: Path, chain: str, 
     return summary
 
 
-def validate_product(output: Path, app_only: bool, source: Path, ios: Path, chain: str, bundle: str, cloud: str) -> None:
+def validate_product(output: Path, app_only: bool, source: Path, ios: Path, chain: str, bundle: str, cloud: str,
+                     *, romfs: Path | None = None, aspect_receipt: Path | None = None) -> None:
     """A compiler-only product is not a staged app: verify packaged resources."""
-    resources = {'romfs/data.arc': (source / 'RomFS/data.arc').stat().st_size}
+    resources = {'romfs/data.arc': ((romfs or source / 'RomFS') / 'data.arc').stat().st_size}
+    check_aspect = None
+    if aspect_receipt:
+        sys.path.insert(0, str(REPO / 'dm/tools'))
+        from smash_aspect import check_assets
+        check_aspect = check_assets
     shader_dir = ios / ('b-' + chain)
     for path in shader_dir.iterdir():
         if path.name.endswith(('_b.json', '_b.metallib', '_bf.metallib')):
@@ -408,6 +469,8 @@ def validate_product(output: Path, app_only: bool, source: Path, ios: Path, chai
             regular(path)
             if path.stat().st_size != size:
                 raise ValueError('Staged resource size differs from the verified input: ' + name)
+        if check_aspect:
+            check_aspect(output / 'romfs/data.arc', aspect_receipt)
     else:
         regular(output)
         with zipfile.ZipFile(output) as archive:
@@ -420,6 +483,9 @@ def validate_product(output: Path, app_only: bool, source: Path, ios: Path, chai
             for name, size in resources.items():
                 if archive.getinfo(prefix + name).file_size != size:
                     raise ValueError('Packaged resource size differs from the verified input: ' + name)
+            if check_aspect:
+                with archive.open(prefix + 'romfs/data.arc') as stream:
+                    check_aspect(stream, aspect_receipt)
     if info.get('CFBundleIdentifier') != bundle or metadata != {
             'BundleIdentifier': bundle, 'CloudContainer': cloud, 'RequiresExtendedVirtualAddressing': True, 'GameTitleID': TITLE}:
         raise ValueError('The built app metadata does not match the private game/signing profile')
@@ -787,6 +853,8 @@ def parse_args(argv=None):
     parser.add_argument('--bundle-id', required=True, help='your explicit App ID; retain it and the signing team for updates')
     parser.add_argument('--cloud-container', default='', help='opt into your own CloudKit container; off by default')
     parser.add_argument('--frame-generation', choices=('off', 'on'), default='off', help='optional generated frames; 60 Hz simulation remains unchanged')
+    parser.add_argument('--display-aspect', choices=('16:9', '4:3'), default='16:9',
+                        help='4:3 prepares the matching iPad camera, HUD and clipping corrections; default 16:9')
     parser.add_argument('--show-fps', action='store_true')
     parser.add_argument('--app-only', action='store_true', help='stage an unsigned .app with APFS clones, avoiding an IPA round trip')
     parser.add_argument('--output', type=Path, help='new private .app or .ipa output; defaults inside --work')
@@ -822,6 +890,8 @@ def main(argv=None) -> int:
         raise ValueError('--update and --keys apply only to --base input')
     if bool(args.shaders) != bool(args.shader_manifest):
         raise ValueError('--shaders and --shader-manifest must be provided together')
+    if args.capture_runtime and args.display_aspect != '16:9':
+        raise ValueError('Run optional shader capture with --display-aspect 16:9; the 4:3 asset overlay is prepared separately')
     paths = {name: outside(value) for name, value in vars(args).items() if isinstance(value, Path)}
     work = paths['work']
     if work.exists():
@@ -848,7 +918,7 @@ def main(argv=None) -> int:
         work.mkdir(parents=True)
         for name in ('logs', 'tmp', 'tools'):
             (work / name).mkdir()
-        profile = make_profile(work, args.cloud_container, args.frame_generation == 'on')
+        profile = make_profile(work, args.cloud_container, args.frame_generation == 'on', args.display_aspect)
         env = dict(os.environ, GAME=TITLE, DM_GAME=TITLE, DM_GAMES_DIR=str(profile.parent), DM_GAMES_FIRST='1',
                    DM_ROOT=str(work), WORK=str(work / 'tmp'), J=str(args.jobs), PYTHONDONTWRITEBYTECODE='1',
                    DM_BUNDLE_ID=args.bundle_id, DM_DISPLAY_NAME='Super Smash Bros. Ultimate', DM_APP_VERSION='13.0.5',
@@ -869,6 +939,8 @@ def main(argv=None) -> int:
                 run([sys.executable, REPO / 'dm/tools/patch_nso.py', source / 'ExeFS' / module, rewritten, module], work, 'rewrite-' + module, env)
             run([sys.executable, REPO / 'tools/smash_nro.py', 'prepare', nro_source, rewritten,
                  '--nrr-dir', source / 'RomFS/.nrr', '--rewrite'], work, 'rewrite-98-nros', env)
+        verify_rewritten(rewritten, nro_source, extraction)
+        rewritten, romfs, aspect_receipt = prepare_display(source, rewritten, work, env, args.display_aspect)
         verify_rewritten(rewritten, nro_source, extraction)
         capture_path = paths.get('nvn_shader_capture')
         capture_record = validate_capture(capture_path, source, nro_source) if capture_path else None
@@ -891,14 +963,16 @@ def main(argv=None) -> int:
         receipt = {'format': 1, 'title_id': TITLE, 'version': '13.0.5', 'inputs': extraction,
                    'profile': str(profile), 'rewritten': str(rewritten), 'shaders': str(ios), 'shader_manifest': str(manifest),
                    'completeness': completeness, 'capture': capture_record, 'source_manifests': source_manifests,
+                   'display_aspect': args.display_aspect, 'display_preparation': str(aspect_receipt) if aspect_receipt else None,
                    'cloud_enabled': bool(args.cloud_container), 'app_built': False}
         if not args.prepare_only:
             release_preparation_scratch(work)
             output.parent.mkdir(parents=True, exist_ok=True)
-            env.update(W=str(work / 'app-build'), PATCHED=str(rewritten), ROMFS=str(source / 'RomFS'), MSL_IOS=str(ios),
+            env.update(W=str(work / 'app-build'), PATCHED=str(rewritten), ROMFS=str(romfs), MSL_IOS=str(ios),
                        DM_APP_ONLY='1' if args.app_only else '0', DM_ICON=str(source / 'icon.jpg'))
             run(['bash', REPO / 'dm/ios/tools/build_ipa.sh', output], work, 'app-build', env)
-            validate_product(output, args.app_only, source, ios, chain, args.bundle_id, args.cloud_container)
+            validate_product(output, args.app_only, source, ios, chain, args.bundle_id, args.cloud_container,
+                             romfs=romfs, aspect_receipt=aspect_receipt)
             receipt.update(app_built=True, output=str(output))
         (work / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
         print(f'Prepared {completeness["compiled"]:,}/{completeness["expected"]:,} shaders; receipt: {work / "receipt.json"}')

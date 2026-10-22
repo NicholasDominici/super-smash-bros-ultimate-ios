@@ -28,9 +28,12 @@ def main():
             ('feedback', ['dm/host/tests/t_feedback.c', 'dm/host/hle_feedback.c']),
             ('feedback-players', ['dm/host/tests/t_feedback_players.c', 'dm/host/hle_feedback.c']),
             ('smash-feedback', ['dm/host/tests/t_smash_feedback.c', 'dm/host/hle_feedback.c']),
+            ('smash-aspect', ['dm/host/tests/t_smash_aspect.c']),
             ('guest-read', ['dm/host/tests/t_guest_read.c']),
             ('nvn-command-pools', ['dm/host/tests/t_nvn_cb_pool.c']),
             ('nvn-program-cache', ['dm/host/tests/t_nvn_program_cache.c']),
+            ('nvn-present-slots', ['dm/host/tests/t_nvn_present_slots.c']),
+            ('movie-packets', ['dm/host/tests/t_movie_packets.c']),
             ('policy', ['dm/host/tests/t_feedback_policy.c']),
             ('takeoffs', ['dm/host/tests/t_odyssey_feedback.c']),
             ('aspect', ['dm/host/tests/t_present_aspect.c']),
@@ -50,8 +53,17 @@ def main():
         binary = build / 'nvn-program-cache-address'
         run(common + ['-fsanitize=address,undefined', 'dm/host/tests/t_nvn_program_cache.c', '-o', binary])
         run([binary])
+        binary = build / 'movie-packets-address'
+        run(common + ['-fsanitize=address,undefined', 'dm/host/tests/t_movie_packets.c', '-o', binary])
+        run([binary])
+        binary = build / 'smash-aspect-address'
+        run(common + ['-fsanitize=address,undefined', 'dm/host/tests/t_smash_aspect.c', '-o', binary])
+        run([binary])
         binary = build / 'nvn-command-pools-threads'
         run(common + ['-fsanitize=thread', 'dm/host/tests/t_nvn_cb_pool.c', '-o', binary])
+        run([binary])
+        binary = build / 'nvn-present-slots-threads'
+        run(common + ['-fsanitize=thread', 'dm/host/tests/t_nvn_present_slots.c', '-o', binary])
         run([binary])
         for name, source, flags in [
             ('smash-feedback-threads', 'dm/host/tests/t_smash_feedback.c', ['-DDM_SMASH_STRESS']),

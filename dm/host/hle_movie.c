@@ -8,6 +8,7 @@
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
+#include "movie_packets.h"
 #include <AudioToolbox/AudioToolbox.h>   // AAC
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
@@ -56,6 +57,7 @@ HLE_FORCE("_ZN5movie9Extractor13SetDataSourceEPKc", "movie demuxer: the host doe
 #define MD_AUDIO(d) ((d)->type == MD_TYPE_VORBIS || (d)->type == MD_TYPE_AAC)
 #define MD_FMT_PCM16 1
 #define MD_PCM_CAP (8192 * 8 * 2)   // bytes per audio output: a Vorbis packet gives at most 4096 samples per channel (blocksize 8192), 8 channels at most
+#define MD_VORBIS_PENDING_CAP (2u * (65025u + 27u + 255u))   // two maximum adapter pages; resync normally retains only three bytes
 
 typedef struct {
     pthread_mutex_t mu;                          // guards the queues and slots below
@@ -73,6 +75,7 @@ typedef struct {
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
+    dm_movie_bytes vb_pending;                  // pushdata may consume only part of a page, particularly after Flush
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
@@ -287,16 +290,44 @@ static int md_vorbis(mdec_t *d, const uint8_t *p, int n, int slot) {
     if (n >= 65025) { if (!d->red_vb++) LOG("[RED] movie: Vorbis packet of %d bytes, larger than a page", n); return 0; }
     uint8_t *page = malloc((size_t)n + 27 + 255); if (!page) return 0;
     size_t len = ogg_page(d, page, p, n, 0);
-    int ch = 0, ns = 0; float **pcm = NULL;
-    stb_vorbis_decode_frame_pushdata(d->vb, page, (int)len, &ch, &pcm, &ns); free(page);
-    if (ns <= 0 || ch <= 0 || !pcm) return 0;
-    d->ogg_gran += ns;
-    size_t need = (size_t)ns * ch * 2;
-    if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
-    int16_t *o = (int16_t *)d->out[slot].frm;
-    for (int i = 0; i < ns; i++) for (int c = 0; c < ch; c++) { float v = pcm[c][i] * 32767.0f; o[i * ch + c] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v); }
-    d->out[slot].bytes = need;
-    return 1;
+    int appended = dm_movie_bytes_append(&d->vb_pending, page, len, MD_VORBIS_PENDING_CAP); free(page);
+    if (!appended) {
+        if (!d->red_vb++) LOG("[RED] movie: Vorbis pending data exceeds the adapter limit or allocation failed");
+        dm_movie_bytes_clear(&d->vb_pending); stb_vorbis_flush_pushdata(d->vb); return 0;
+    }
+    size_t bytes = 0;
+    while (d->vb_pending.size) {
+        int ch = 0, ns = 0; float **pcm = NULL;
+        int used = stb_vorbis_decode_frame_pushdata(d->vb, d->vb_pending.data, (int)d->vb_pending.size, &ch, &pcm, &ns);
+        // Flush enters CRC resynchronization, which can consume bytes without
+        // producing samples. Keep every unconsumed byte for this or a later call.
+        if (used < 0 || (size_t)used > d->vb_pending.size || (!used && ns > 0)) {
+            if (!d->red_vb++) LOG("[RED] movie: Vorbis push decoder returned an invalid consumed-byte count");
+            dm_movie_bytes_clear(&d->vb_pending); stb_vorbis_flush_pushdata(d->vb); return 0;
+        }
+        if (ns > 0 && ch > 0 && pcm) {
+            size_t need = bytes + (size_t)ns * (size_t)ch * 2;
+            if (ch > 8 || ns > 4096 || need > MD_PCM_CAP) {
+                if (!d->red_vb++) LOG("[RED] movie: Vorbis samples exceed the PCM output capacity");
+                dm_movie_bytes_clear(&d->vb_pending); stb_vorbis_flush_pushdata(d->vb); return 0;
+            }
+            if (d->out[slot].cap < need) {
+                void *pout = realloc(d->out[slot].frm, need);
+                if (!pout) {
+                    if (!d->red_vb++) LOG("[RED] movie: Vorbis PCM output allocation failed");
+                    dm_movie_bytes_clear(&d->vb_pending); stb_vorbis_flush_pushdata(d->vb); return 0;
+                }
+                d->out[slot].frm = pout; d->out[slot].cap = need;
+            }
+            int16_t *o = (int16_t *)(d->out[slot].frm + bytes);
+            for (int i = 0; i < ns; i++) for (int c = 0; c < ch; c++) { float v = pcm[c][i] * 32767.0f; o[i * ch + c] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v); }
+            bytes = need; d->ogg_gran += ns;
+        }
+        if (!used) break;
+        dm_movie_bytes_consume(&d->vb_pending, (size_t)used);
+    }
+    d->out[slot].bytes = bytes;
+    return bytes != 0;
 }
 // ---------- AAC ----------
 // The demuxer hands over raw AAC frames (1024 samples each) and the AudioSpecificConfig in csd-0. AudioToolbox takes the configuration as an MPEG-4 ES descriptor (the magic cookie built
@@ -356,7 +387,7 @@ static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
     return mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
 }
-static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
+static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } dm_movie_bytes_clear(&d->vb_pending); if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
 void dm_host_helper_qos(qos_class_t q);   // hle_thread.c
 static void *md_worker(void *arg) {
     mdec_t *d = arg;
@@ -414,7 +445,10 @@ static void md_pump(mdec_t *d) {
         pthread_mutex_unlock(&d->mu);
         int got = 0, avc = d->type == MD_TYPE_AVC;
         int eos = (pk.flags & 4) != 0;   // MediaCodec BUFFER_FLAG_END_OF_STREAM
-        if (eos && pk.pts < 0) pk.size = 0;   // Monster Hunter Rise ends a stream with time -1 and the whole input buffer (4 MB) as its length: no data (decoding it gave VideoToolbox -12909 and AudioToolbox -50)
+        int payload = dm_movie_payload_size(pk.off, pk.size, pk.pts, pk.flags, MD_INCAP,
+                                           DM_GAME_PROGRAM_ID == 0x01006A800016E000ull);
+        if (payload != pk.size) MD_TRACE(d, 14, "empty end-of-stream input: range %d+%d, time %lld, flags %#x", pk.off, pk.size, (long long)pk.pts, pk.flags);
+        pk.size = payload;
         if ((pk.size > 0 && (d->type == MD_TYPE_VP9 || MD_AUDIO(d) || avc)) || (avc && eos)) {
             d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; d->jflush = 0; md_job(d, MDJ_DECODE); got = d->jgot; }
         int more = avc && eos && d->avc && mavc_queued(d->avc) > 0;   // H.264 pictures still queued: they follow this output, the last of them carries the end-of-stream flag
@@ -464,6 +498,7 @@ static void md_free(void **self) {
     for (int i = 0; i < MD_NIN; i++) free(d->in[i]);
     for (int k = 0; k < MD_NOUT; k++) free(d->out[k].frm);
     free(d->vhdr[0]); free(d->vhdr[1]);
+    dm_movie_bytes_dispose(&d->vb_pending);
     pthread_mutex_destroy(&d->mu); pthread_mutex_destroy(&d->dmu); pthread_mutex_destroy(&d->wmu); pthread_cond_destroy(&d->wcv); free(d);
 }
 HLE_FORCE("_ZN5movie7DecoderD2Ev", "movie decoder destructor: frees the host object", void, h_movie_DecD2, void **self) { md_free(self); }
@@ -515,6 +550,7 @@ HLE_FORCE("_ZN5movie7Decoder5StartEv", "movie decoder start: all inputs empty, n
 static void md_reset(mdec_t *d, int close) {
     pthread_mutex_lock(&d->dmu);   // wait for the packet being decoded
     if (close) md_job(d, MDJ_CLOSE);
+    else if (d->vb) { stb_vorbis_flush_pushdata(d->vb); dm_movie_bytes_clear(&d->vb_pending); }
     if (d->avc) mavc_drop(d->avc);   // H.264 pictures waiting for their turn belong to the old position
     pthread_mutex_lock(&d->mu);
     for (int i = 0; i < MD_NIN; i++) d->infree[i] = i;
@@ -539,7 +575,6 @@ HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset
 HLE_FORCE("_ZN5movie7Decoder5FlushEv", "movie decoder flush: all inputs and outputs returned", int, h_movie_Flush, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     MD_TRACE(d, 5, "Flush"); md_defer_drop(d); md_reset(d, 0);
-    if (d->vb) { pthread_mutex_lock(&d->dmu); stb_vorbis_flush_pushdata(d->vb); pthread_mutex_unlock(&d->dmu); }   // a seek: start the overlap afresh
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: acquire a free input index", int, h_movie_AcqIn, void **self, int *idx, int *left) {

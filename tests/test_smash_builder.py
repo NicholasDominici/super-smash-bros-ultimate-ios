@@ -229,7 +229,60 @@ class SmashBuilderTests(unittest.TestCase):
         cloud = smash.make_profile(self.root / 'private-cloud', 'iCloud.com.example.smash', True)
         self.assertIn('cloud_container\tiCloud.com.example.smash', (cloud / 'game.tsv').read_text())
         self.assertIn('frame_generation\t2x', (cloud / 'game.tsv').read_text())
+        ipad = smash.make_profile(self.root / 'private-ipad', '', False, '4:3')
+        self.assertIn('display_aspect\t4:3', (ipad / 'game.tsv').read_text())
+        self.assertIn('display_aspect\t16:9', (profile / 'game.tsv').read_text())
+        with self.assertRaisesRegex(ValueError, 'display aspect'):
+            smash.make_profile(self.root / 'invalid-aspect', '', False, '21:9')
+        self.assertFalse((self.root / 'invalid-aspect').exists())
         self.assertEqual((ROOT / 'dm/games' / smash.TITLE / 'game.tsv').read_bytes(), original)
+
+    def test_original_display_reuses_inputs_without_creating_an_overlay(self):
+        source, cache, work = (self.root / name for name in ('game', 'cache', 'new'))
+        self.assertEqual(smash.prepare_display(source, cache, work, {}, '16:9'),
+                         (cache, source / 'RomFS', None))
+        self.assertFalse(work.exists())
+
+    def test_display_clone_rejects_linked_resources_before_copying(self):
+        source, cache, work = (self.root / name for name in ('game', 'cache', 'new'))
+        (source / 'RomFS').mkdir(parents=True)
+        cache.mkdir()
+        (source / 'RomFS/linked-input').symlink_to(self.root / 'unrelated-private-file')
+        with self.assertRaisesRegex(ValueError, 'Unsupported display input'):
+            smash.prepare_display(source, cache, work, {}, '4:3')
+        self.assertFalse(work.exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'private APFS clone staging requires macOS')
+    def test_ipad_display_preserves_reused_cache_and_complete_romfs(self):
+        source, cache, work = (self.root / name for name in ('game', 'cache', 'new'))
+        (source / 'RomFS/.nrr').mkdir(parents=True)
+        (source / 'RomFS/data.arc').write_bytes(b'original synthetic archive')
+        (source / 'RomFS/.nrr/fixture.nrr').write_bytes(b'registration')
+        cache.mkdir()
+        (cache / 'main.patched.bin').write_bytes(b'original cached main')
+        (cache / 'nro_catalog.c').write_bytes(b'catalog identity')
+        work.mkdir()
+
+        def prepare(original, base, archive, output):
+            self.assertEqual(original, source / 'ExeFS/main')
+            self.assertEqual(archive, source / 'RomFS/data.arc')
+            self.assertNotEqual(base, cache)
+            (base / 'main.patched.bin').write_bytes(b'fresh main with UI gates')
+            (output / 'romfs').mkdir(parents=True)
+            (output / 'romfs/data.arc').write_bytes(b'corrected synthetic archive')
+            receipt = output / 'receipt.json'
+            receipt.write_text('{}')
+            return SimpleNamespace(rewritten=base, romfs=output / 'romfs', receipt=receipt)
+
+        with mock.patch.dict(sys.modules, {'smash_aspect': SimpleNamespace(prepare=prepare)}), mock.patch.object(smash, 'run') as rewrite:
+            patched, romfs, receipt = smash.prepare_display(source, cache, work, {}, '4:3')
+        self.assertEqual(rewrite.call_count, 1)
+        self.assertEqual((cache / 'main.patched.bin').read_bytes(), b'original cached main')
+        self.assertEqual((patched / 'nro_catalog.c').read_bytes(), b'catalog identity')
+        self.assertEqual((source / 'RomFS/data.arc').read_bytes(), b'original synthetic archive')
+        self.assertEqual((romfs / 'data.arc').read_bytes(), b'corrected synthetic archive')
+        self.assertEqual((romfs / '.nrr/fixture.nrr').read_bytes(), b'registration')
+        self.assertTrue(receipt.is_file())
 
     def test_arc_manifest_must_be_complete_and_match_bytes(self):
         directory = self.root / 'arc'

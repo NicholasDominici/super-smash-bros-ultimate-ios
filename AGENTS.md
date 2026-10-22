@@ -40,6 +40,11 @@ README.md, and keep flags/examples synchronized with the actual tools.
   30 GiB arena consistent with the 32 GiB alias/36 GiB host profile.
 - Per-game values belong in dm/games/<title-id>/game.tsv. Display camera and HUD
   must be corrected together. iPad and iPhone preparation must not mutate inputs.
+  Smash's optional 4:3 group admits exact US-English 13.0.5 resources through
+  smash_aspect.py and smash_aspect_ui.py. Preserve animated anchors, clipping,
+  complete arena/haptic gates, fixed compressed spans and source-bound receipts.
+  Validate actual packaged span hashes; equal ARC sizes do not prove an overlay
+  was staged. Do not enable only the frontend ratio or apply broad pane scaling.
 - Preserve 60 Hz simulation. Generated 120 FPS presentation is optional and must
   be described as interpolation. Never call it native 120 FPS rendering.
 - Never hold the presentation mutex across Metal/drawable calls or frame-generator

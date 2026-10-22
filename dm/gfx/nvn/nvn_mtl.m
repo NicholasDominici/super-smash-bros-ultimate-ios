@@ -26,6 +26,7 @@
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree (in the game profile folder, -I from the Makefile)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
 #include "nvn_present_viewport.h"
+#include "nvn_present_slots.h"
 #import "nvn_framegen.h"
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
 #define NTEX 256
@@ -79,7 +80,7 @@ static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
 static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip;
 static id<MTL4ArgumentTable> g_present_args;
 static id<MTLBuffer> g_present_uv[3];
-static uint64_t g_present_alloc_fence[3];
+static nvn_present_slot g_present_slots[3];   // Under g_pq_mu; only actual GPU feedback completes a slot
 static pthread_mutex_t g_pq_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_pq_cv = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t g_link_cv = PTHREAD_COND_INITIALIZER;
@@ -2969,6 +2970,18 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
         NSUInteger ns = base.textureType == MTLTextureType3D ? 1 : (r.v.set_layers && r.v.nlayers ? r.v.nlayers : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1) - s0);
         MTLTextureType tt = r.v.set_target ? ttype(r.v.target, base.textureType) : base.textureType;
         if (tt == MTLTextureType2D && ns > 1) ns = 1;
+        if (tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray) {
+            NSUInteger faces = base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+            if ((tt == MTLTextureTypeCube ? ns != 6 : !ns || ns % 6) || s0 > faces || ns > faces - s0) {
+                // The caller holds g_rmu: bound diagnostics without changing the requested view or hiding Metal's failure.
+                static unsigned invalid_cube_views;
+                if (invalid_cube_views < 8) MLOG("cube-view preflight #%u: tid=%d serial=%llu guest target=%d size=%ux%ux%u levels=%u format=%#x; view present=%d target=%u:%u layers=%u:%u+%u levels=%u:%u+%u format=%u:%#x swizzle=%d stencil=%d; Metal parent type=%lu size=%lux%lu depth=%lu array=%lu levels=%lu format=%lu; request type=%lu levels=%lu+%lu slices=%lu+%lu total-faces=%lu format=%u",
+                    ++invalid_cube_views, tid, (unsigned long long)r.t.serial, r.t.d.target, r.t.d.width, r.t.d.height, r.t.d.depth, r.t.d.levels, r.t.d.format,
+                    r.has_v, r.v.set_target, r.v.target, r.v.set_layers, r.v.min_layer, r.v.nlayers, r.v.set_levels, r.v.base_level, r.v.nlevels, r.v.set_format, r.v.format, need_sw, stv,
+                    (unsigned long)base.textureType, (unsigned long)base.width, (unsigned long)base.height, (unsigned long)base.depth, (unsigned long)base.arrayLength, (unsigned long)base.mipmapLevelCount, (unsigned long)base.pixelFormat,
+                    (unsigned long)tt, (unsigned long)l0, (unsigned long)nl, (unsigned long)s0, (unsigned long)ns, (unsigned long)faces, pf);
+            }
+        }
         v = need_sw ? [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns) swizzle:MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3])]
                     : [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns)];
         if (!v) { RED_ONCE(11, "cannot create texture view id %d", tid); v = base; }
@@ -7278,11 +7291,11 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
     int alloc_i = (int)(ticket % 3);
-    if (g_present_alloc_fence[alloc_i]) {
-        pthread_mutex_lock(&g_pq_mu);
-        while (g_pq_done < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
-        pthread_mutex_unlock(&g_pq_mu);
-    }
+    pthread_mutex_lock(&g_pq_mu);
+    // Logical retirement can advance when frames are merged or cancelled.
+    // Allocator reset and UV overwrite require this slot's actual GPU feedback.
+    while (!nvn_present_slot_ready(&g_present_slots[alloc_i])) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+    pthread_mutex_unlock(&g_pq_mu);
     [g_present_alloc4[alloc_i] reset];
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
@@ -7292,10 +7305,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String);
-        pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
+        pthread_mutex_lock(&g_pq_mu);
+        if (!nvn_present_slot_complete(&g_present_slots[alloc_i], ticket)) MDIE("present slot %d completion identity mismatch (ticket %llu)", alloc_i, (unsigned long long)ticket);
+        if (ticket > g_pq_done) g_pq_done = ticket;
+        g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
-    pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
+    pthread_mutex_lock(&g_pq_mu);
+    if (!nvn_present_slot_submit(&g_present_slots[alloc_i], ticket)) MDIE("present slot %d submitted while busy (ticket %llu)", alloc_i, (unsigned long long)ticket);
+    g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
     // The present thread can create/register its source texture lazily. Publish
     // those residency additions before this queue submission can read them.
     res_commit();
@@ -7316,7 +7334,6 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         }
     }
     [g_q4 signalDrawable:dr];
-    g_present_alloc_fence[alloc_i] = ticket;
 #if TARGET_OS_SIMULATOR   // The iOS simulator SDK has no presentation-time callback and no minimum display duration (used only for picture acceptance, display-link ticks are not counted)
     (void)period; [dr present];
 #else

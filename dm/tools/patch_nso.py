@@ -207,6 +207,8 @@ OBS = {
     (0x1750dd0, 21, 'd10203ff', 'map_controls entry: actual controller and custom ZL/ZR mappings; orig sub sp,sp,#0x80'),
     (0x4def24, 22, 'f9407660', 'committed fighter status after pre/init and work cleanup, immediately after BLR: x19 StatusModule; orig ldr x0,[x19,#0xe8]'),
     (0x6b92c0, 23, 'd101c3ff', 'ControlModule exec heartbeat: expire stale guard effects; orig sub sp,sp,#0x70'),
+    (0x44d60, 24, 'f9400428', 'ui2d SetProjection entry: scoped 4:3 owner/caller gate; orig ldr x8,[x1,#8]'),
+    (0x378f140, 25, 'f81d0ff5', 'Smash UI DrawInfo per-pass setup: coherent logical 4:3 scissor context; orig str x21,[sp,#-0x30]!'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl

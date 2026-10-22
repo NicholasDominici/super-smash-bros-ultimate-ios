@@ -6,14 +6,15 @@ An experimental native Apple Silicon port of **Super Smash Bros. Ultimate
 The game code is rewritten on your Mac and signed into the app; there is no
 runtime JIT or jailbreak requirement.
 
-**This is a bring-up project.** Native Mac tests demonstrate movement, jumps,
-attacks, CPU combat, damage and knockouts. The signed iPad app installs, boots
-and uploads its first committed save to iCloud. Its first display submissions
-hit a GPU address fault, so physical gameplay is not yet qualified. Display
-residency and copy-barrier fixes are implemented; their physical comparison
-remains pending. One known
-geometry shader remains unsupported. Two-controller matches, controller feel,
-sustained performance and iCloud handoffs still need device tests. Read
+**This is an experimental port.** A player has played it successfully on an M5
+iPad Pro, and actual completed saves have uploaded to iCloud. Clean menu
+rendering also works with Metal validation and screenshot diagnostics disabled.
+Some scene transitions can trigger a Metal texture-view assertion, which is
+under investigation. First-use shader compilation causes noticeable pauses; learned pipeline recipes
+are retained and preloaded on later launches. Intro-movie playback is still
+unreliable, and one known geometry shader remains unsupported. Two-controller
+matches, controller feel, sustained performance and iCloud handoffs still need
+device tests. Read
 [the current limits](docs/VALIDATION.md) before spending time on a build.
 
 You provide your own **base-game NSP or XCI, update 13.0.5 NSP, and console
@@ -27,6 +28,8 @@ game, executable game modules, shaders, keys, saves or installable game IPA.
   `data.arc`.
 - An automatic, exact-version virtual-arena compatibility patch for the iPad
   address-space budget. Your original game files remain unchanged.
+- Optional **4:3 iPad camera and UI preparation** for the supported US-English
+  game resources, including animated HUD anchors and nested clipping.
 - **Two local players on one device**, using independent compatible extended
   gamepads. Mixed controller models are supported by the adapter.
 - The game's authored left/right vibration, routed to the correct controller.
@@ -44,10 +47,12 @@ physical gameplay testing. [Controller details](docs/CONTROLLERS.md) and
 
 ## Picture, saves and updates
 
-The current build preserves the game's **16:9 composition**. An iPad can show
-borders. A corrected native iPad/iPhone camera and HUD layout is not implemented;
-stretching the image would distort both. Native display-pixel rendering and
-stable 60/120 FPS on a particular device are not guaranteed.
+The default build preserves the game's **16:9 composition**. Use
+`--display-aspect 4:3` for the corrected iPad camera, HUD, menus and clipping.
+It prepares private copies of the exact US-English resources and keeps the
+current rendering pixel budget. This option is undergoing physical validation;
+it does not request full display-pixel rendering. See [NATIVE_ASPECT.md](docs/NATIVE_ASPECT.md).
+Stable 60/120 FPS on a particular device is not guaranteed.
 
 Local progress lives in the app's `Documents/save` folder, accessible through
 Files or Finder file sharing. Save in-game, fully close the app and back up that
@@ -181,6 +186,10 @@ input packages, extraction, shader caches, app staging and device installation.
    ```
 
    Static extraction includes the game's UI and particle-effect shader carriers.
+   For an iPad, add `--display-aspect 4:3` to prepare the matching camera and
+   US-English UI. Leave the flag out for the original 16:9 view. Reused rewritten
+   modules are cloned before the main module is refreshed; original inputs and
+   caches remain unchanged. Optional shader capture currently uses 16:9.
    Optional bounded native capture is available for diagnostics; see
    [INPUTS.md](docs/INPUTS.md). It is not required for the known registered and
    battle shader keys covered by the current static sources.

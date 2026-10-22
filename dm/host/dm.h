@@ -94,10 +94,13 @@ void *guest_sym(const char *name);
 module_t *module_of(const void *p);
 // Gate dispatch: rewritten svc / timer reads come in through the common entry, ret_addr = the return point of that gate block, regs points to the saved x0..x30
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
-// Observation gates (rewriter OBS table; numbering matches patch_nso.py): read-only callbacks, called on a gate hit once attached
+// Observation gates (rewriter OBS table; numbering matches patch_nso.py).
+// Callbacks preserve the saved registers; admitted aspect callbacks may adjust
+// the current guest-owned UI data before its original method executes.
 enum { OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20,
        OBS_SMASH_MAP_CONTROLS = 21, OBS_SMASH_STATUS_COMMITTED = 22,
-       OBS_SMASH_CONTROL_HEARTBEAT = 23, OBS_MAX = 24 };
+       OBS_SMASH_CONTROL_HEARTBEAT = 23, OBS_SMASH_UI_PROJECTION = 24,
+       OBS_SMASH_UI_DRAW = 25, OBS_MAX = 26 };
 void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
 int gate_obs_present(int id);
 uint64_t now_ns(void);

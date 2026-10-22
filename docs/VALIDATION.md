@@ -1,10 +1,41 @@
 # Validation and current limits
 
-This is **Smash Ultimate bring-up**, not a verified finished iPad release.
+This is an **experimental Smash Ultimate port**, with bounded physical iPad
+gameplay evidence and remaining qualification work.
 Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
 
 ## What has evidence
 
+- A player navigated menus and played on an M5 iPad Pro, reporting that gameplay
+  works well with some stuttering. That session enabled Metal validation,
+  residency diagnostics and two synchronous screenshot readbacks; it is not a
+  clean performance baseline. Later physical screenshots show correct native
+  menu rendering with all three diagnostics disabled after skipping the intro.
+  Clean intro-only runs can remain black, so movie decoding is being investigated
+  separately. The display-residency and copy-barrier fixes eliminated the
+  previously observed early GPU faults and API-validation assertion in these
+  runs. No physical two-controller or haptic-feel claim follows from touch play.
+- Instrumented play identifies pipeline first-use work at 153 of 161 selected
+  frames longer than 33.33 ms. In one example, a 613 ms frame includes 601 ms in
+  submission and only 3.6 ms of GPU execution. The persisted per-device recipe
+  list grows from 43 to 1,173 entries; the next launch preloads 645 libraries,
+  524 render pipelines and four compute pipelines. This establishes cache
+  persistence and warm-up, not elimination of stutter across all stages or
+  fighters. Keep `pso_user.tsv` when updating or comparing runs.
+- The optional 4:3 preparation passes all 362 admitted US-English primary
+  archive transforms and a private canonical check of 1,752 changed fields.
+  An 85-second Mac preflight reaches a Kirby/Mario match with the corrected
+  camera, timer and player HUD in 1440 × 1080 presentation captures. Original
+  inputs, prepared archive, rewritten modules, sources, profile and host remain
+  unchanged. It has no pipeline-link, unresolved-call or command-pool errors,
+  but reports the previously known cube-versus-2D binding fallback. It is not
+  a clean rendering acceptance result or physical iPad layout proof.
+- A later clean iPad session reaches a Metal cube-view assertion during a
+  scene transition. The crash report matches the installed app's binary UUID
+  and identifies the sampling-view constructor in `tex_by_id`. The actual
+  view descriptor is absent from that report, so its interpretation remains
+  under investigation. Bounded invalid-view diagnostics record those fields
+  before construction; diagnostics do not fix or suppress the failure.
 - The supported base plus cumulative update 13.0.5 were merged with LibHac's
   integrity checks. All three original NSO identities are recorded in INPUTS.md.
 - Targeted ARC extraction identified 98 native NRO modules and 14 NRR
@@ -106,19 +137,18 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   deferred-import and composite-lifetime fixes and regenerated format-2 catalog.
   The rebuilt 36 GiB-host package also passes signing with an exact-app
   Extended Virtual Addressing, Increased Memory Limit and CloudKit profile.
-  That build subsequently installed on a physical M5 iPad Pro and boots through
+  That build subsequently installed on a physical M5 iPad Pro and booted through
   SDK/native-module initialization and save creation. Its first display submissions
-  fail with a Metal 4 GPU address fault before game-shader initialization. This
-  is a physical rendering blocker, not a successful gameplay result. The display
+  originally failed with a Metal 4 GPU address fault before game-shader initialization. The display
   path could register a lazily created source texture without committing its
   residency before submission; it now commits through the existing residency
-  mutex. Independent review found no new lock-order or lifetime change. A clean
-  physical comparison is still required to establish causation and recovery.
+  mutex. Independent review found no new lock-order or lifetime change. The
+  physical runs described above no longer report that early fault.
   The corrected source passes a new 85-second Mac Kirby/Fox match with movement,
   item effects and damage; there are no reported rendering, pipeline-link,
   unresolved-call or descriptor-pool errors, and all producer identities remain
   unchanged. The corrected iOS app passes compilation and resource validation.
-  These checks do not replace the pending physical comparison.
+  These Mac checks independently validate the bounded upstream render path.
 - A diagnostic iPad restart with Metal API validation enabled passed the early
   display path but later stopped on an invalid encoder-local copy barrier.
   Its early screenshot readbacks alter submission timing, so that is not a
@@ -129,7 +159,9 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   review is clear. A new 85-second Mac match with Metal API validation explicitly
   enabled exits normally with unchanged identities and no reported rendering,
   pipeline, factory or pool errors. The combined iOS app compiles and validates;
-  a fresh physical comparison without those diagnostics remains pending.
+  the later physical menu run renders without those diagnostics, as described
+  above. Clean intro playback and matched gameplay performance remain separate
+  checks.
 - A real disposable Mac match created a five-file save; production save-archive
   capture, encode, decode and restore preserved its exact digest in a new
   private directory. This validates that actual file set and codec, not iCloud
@@ -138,18 +170,23 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   8,262,840 bytes. Two independent device copies match each other and the
   immutable committed snapshot byte for byte. CloudKit Development acknowledged
   one successful upload with equal local, base and remote SHA-256 digests. This
-  proves that first completed-save upload, not restore or a two-device handoff.
+  proves that first completed-save upload. Subsequent actual player-session
+  commits also receive network acknowledgements with equal local, base and
+  remote digests. Restore and two-device handoff remain untested.
 
 ## What remains unverified
 
-Physical iPad gameplay, a complete two-controller match, per-player feedback
-feel, long sessions, thermal/memory behavior, all fighters/stages/modes and
+Clean matched-gameplay performance, a complete two-controller match, per-player
+feedback feel, long sessions, thermal/memory behavior, all fighters/stages/modes and
 Smash cloud restore and both device-handoff directions remain unverified.
 The first completed-save upload is verified separately above; physical retry,
 account-change and foreground/background behavior still need testing.
 
-The current composition is 16:9. Corrected native iPad/iPhone camera/HUD layouts
-are not implemented; borders are expected on other screen shapes. Frame
+The default composition is 16:9. Optional exact-build US-English 4:3 camera,
+HUD and clipping preparation is implemented and passes synthetic and private
+canonical asset checks; physical layout validation remains pending. It retains
+the current physical raster cost. No native iPhone aspect correction is claimed.
+See [NATIVE_ASPECT.md](NATIVE_ASPECT.md). Frame
 interpolation is optional and off by default. It adds displayed frames while
 retaining 60 Hz simulation; it is not native 120 FPS rendering. Its artifacts,
 latency and performance require their own device tests.
@@ -231,7 +268,7 @@ python3 tools/audit_repo.py
 The source suite covers configuration/signing policy, synthetic ARC/SSBH parsing,
 NRO catalog/loader policy, input/feedback isolation and lifecycle, verified
 observation guards, inherited presentation checks, save-archive integrity and
-CloudKit coordination. The current run passes 113 Python tests plus native,
+CloudKit coordination. The current run passes 134 Python tests plus native,
 sanitizer, archive and 17 cloud-coordinator scenarios (153 checks). It uses no
 game files, accounts or devices. The audit
 checks staged Git blobs for excluded game/signing/private artifacts and pinned

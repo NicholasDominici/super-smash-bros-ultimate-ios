@@ -2,6 +2,7 @@
 #include "dm.h"
 #include "front.h"
 #include "smash_feedback.h"
+#include "smash_aspect.h"
 #include <stdatomic.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
@@ -105,6 +106,7 @@ static void host_preload(int argc, char **argv) {
     { void dm_ue_malloc_install(void); dm_ue_malloc_install(); }   // Unreal's allocator on a host malloc zone, for the builds whose constructor call is cut (hle_uemalloc.c)
     { void dm_odyssey_feedback_install(void); dm_odyssey_feedback_install(); }   // Exact-build, read-only action observation through a checked data vtable slot
     dm_smash_feedback_install();   // Exact-build mapped controls and committed guard events, independently per player
+    dm_smash_aspect_install();     // Optional exact-build 4:3 camera/UI group; fail closed on a partial rewrite
 }
 static struct { int argc; char **argv; pthread_t th; _Atomic int started; } g_pre;
 static void *preload_thread(void *a) { (void)a; host_preload(g_pre.argc, g_pre.argv); return NULL; }
