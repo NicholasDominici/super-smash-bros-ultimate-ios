@@ -16,6 +16,7 @@ jobs:
         run: brew list zstd >/dev/null 2>&1 || brew install zstd
       - name: Game-free source and publication checks
         run: |
+          export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix zstd)/lib"
           python3 -m pip install -r requirements.txt
           python3 tools/check.py
       - name: Bounded ARC and effect parser tests
