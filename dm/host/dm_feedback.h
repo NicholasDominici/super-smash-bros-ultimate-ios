@@ -11,7 +11,8 @@ enum {
     DM_FEEDBACK_RUMBLE_LEFT = 1u << 0,
     DM_FEEDBACK_RUMBLE_RIGHT = 1u << 1,
     DM_FEEDBACK_MOTION = 1u << 2,
-    DM_FEEDBACK_MOTION_MAX = 16
+    DM_FEEDBACK_MOTION_MAX = 16,
+    DM_FEEDBACK_MAX_PLAYERS = 8
 };
 typedef struct { float amp_low, freq_low, amp_high, freq_high; } dm_vibration_value;
 typedef struct { uint32_t type, position; } dm_vibration_info;
@@ -30,6 +31,19 @@ typedef struct {
     uint64_t motion_samples, motion_updated_ns;
     uint64_t vibration_sends, motion_reads, motion_states_returned;
 } dm_feedback_output;
+
+// Configure once from the profile before creating targets; default one preserves
+// existing ports. Logical slots exist independently of physical connectivity.
+void dm_feedback_configure_players(unsigned count);
+void dm_feedback_swap_npad_assignments(unsigned a, unsigned b);
+uint64_t dm_feedback_set_player_device(unsigned player, int connected, int foreground, unsigned capabilities, uint64_t now_ns);
+uint64_t dm_feedback_player_epoch(unsigned player);
+void dm_feedback_poll_player(unsigned player, uint64_t now_ns, dm_feedback_output *out);
+// Snapshot an active guest Npad's physical target and lifecycle epoch. Extra
+// game-specific effects must revalidate this route before physical playback.
+int dm_feedback_npad_target(uint32_t id, unsigned *player, uint64_t *epoch);
+int dm_feedback_motion_push_player(unsigned player, uint64_t epoch, const double accel_g[3],
+                                  const double angular_rad_s[3], const double quaternion_xyzw[4], uint64_t now_ns);
 
 // Every lifecycle/capability transition clears pending output and motion history.
 // Capture the returned epoch when binding a motion callback: old callbacks cannot

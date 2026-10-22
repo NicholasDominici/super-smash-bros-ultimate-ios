@@ -8,6 +8,8 @@
 #   nx_extract saves the update's there when an update is packed, else the base game's), the bundle ID is org.nxnative.<base game title ID in lowercase> (DM_DISPLAY_NAME / DM_APP_VERSION / DM_BUNDLE_ID override them);
 #   DM_SHOW_FPS=1 turns the frame-rate counter on (DMShowFPS in Info.plist; DM_SHOW_FPS in the app's Documents/env.txt overrides it on the phone);
 #   the IPA name, code modules, RomFS marker and shader tables come from the game profile
+#   DM_APP_ONLY=1 stages a private .app using APFS clones (first argument is the .app path), for direct development signing/install without packing/extracting an IPA
+#   DM_COMPILE_ONLY=1 stops after compiling code/metadata; resources are not staged and the result is not an installable game
 set -u
 cd "$(dirname "$0")/.." || exit 1
 IOS=$PWD; DM=$(cd .. && pwd)
@@ -39,7 +41,7 @@ else [ -n "$V" ] && ls "$MSL_IOS/b-$V" 2> /dev/null | grep -q '_b.metallib$' || 
 t "app: $DM_DISPLAY_NAME $DM_APP_VERSION ($DM_BUNDLE_ID)$([ $DM_SHOW_FPS = YES ] && echo ', frame-rate counter on')"
 t "generate Gen/ (host sources, embedded modules, tables)"
 rm -rf Gen || die "remove previous generated links"
-if [ -n "${ODYSSEY_PRESET:-}" ]; then
+if [ -n "${W:-}" ]; then
   # Icons/fonts and generated embed inputs belong in the player's private work
   # directory too. The ignored Gen/ entry is only a link into that directory.
   mkdir -p "$W" || die "mkdir private work directory"
@@ -48,7 +50,12 @@ if [ -n "${ODYSSEY_PRESET:-}" ]; then
 fi
 mkdir -p Gen/dm || die "mkdir Gen"
 python3 tools/gen_build.py ../host Gen > Gen/dm.xcconfig || die "gen_build"
-F=$(python3 tools/gen_embed.py "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"
+NRO_MODS=
+if [ -f "$PATCHED/nro_catalog.c" ]; then
+  cp "$PATCHED/nro_catalog.c" Gen/src/nro_catalog.c || die "copy private native-module catalog"
+  NRO_MODS=$(python3 "$DM/../tools/smash_nro.py" names "$PATCHED") || die "read native-module catalog"
+fi
+F=$(python3 tools/gen_embed.py "$PATCHED" Gen/embed.S $MODS $NRO_MODS) || die "gen_embed"
 echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig
 cp "$PATCHED"/*.fixups.tsv "$PATCHED"/*.gates.tsv "$PATCHED"/*.cuts.tsv "$PATCHED"/*.obs.tsv Gen/dm/ || die "copy rewriter tables"
 if [ "$GFXAPI" = vulkan ]; then cp "$GD/shader_map.tsv" "$GD/pso_manifest.tsv" Gen/dm/ || die "copy shader tables"   # empty NVN tables: the NVN layer is never used
@@ -87,7 +94,25 @@ APP=$DD/Build/Products/Release-iphoneos/DmIOS.app; [ -d "$APP" ] || APP=$(grep -
 # Straight from the sources: the app without its signature, and without the folders an app built before pack_ipa.py still has (DerivedData keeps resources that left the project;
 # msl/ is also deleted there, it took 1.5 GB of the home disk), then the shader libraries, the add-on content (the RomFS extracted from the player's DLC NSPs, one folder per index:
 # the app sets DM_AOC_DIR at launch, the host reports them as owned and mounts them from it) and the RomFS
-# Record the compiled profile for the signing helper, without any account secrets.
+# Record the actual compiled game profile for the signing helper. Read the
+# container from that profile rather than a separate, potentially stale flag.
+python3 - "$APP/NativeBuild.plist" "$DM/games" <<'PYNATIVE'
+import os, plistlib, sys
+sys.path.insert(0, sys.argv[2])
+import game
+profile = game.load(os.environ['GAME'])
+with open(sys.argv[1], 'wb') as f:
+    plistlib.dump({'BundleIdentifier': os.environ['DM_BUNDLE_ID'],
+                  'CloudContainer': profile.get('cloud_container', ''),
+                  'RequiresExtendedVirtualAddressing': profile.get('extended_virtual_addressing', 'off') == 'on',
+                  'GameTitleID': profile.id}, f)
+PYNATIVE
+[ $? -eq 0 ] || die "record compiled profile"
+if [ "${DM_COMPILE_ONLY:-0}" = 1 ]; then
+  t "compile-only result: $APP (game resources not staged)"
+  exit 0
+fi
+# Retain compatibility with the inherited Odyssey builder.
 if [ -n "${ODYSSEY_PRESET:-}" ]; then
   export ODYSSEY_CLOUD_CONTAINER=${ODYSSEY_CLOUD_CONTAINER:-}
   python3 - "$APP/OdysseyBuild.plist" <<'PYMETA'
@@ -97,6 +122,14 @@ with open(sys.argv[1], 'wb') as f:
                   'CloudContainer': os.environ['ODYSSEY_CLOUD_CONTAINER'],
                   'DisplayPreset': os.environ['ODYSSEY_PRESET']}, f)
 PYMETA
+fi
+if [ "${DM_APP_ONLY:-0}" = 1 ]; then
+  STAGE=(--app "$APP" --output "$OUT_IPA" --shaders "$MSL_IOS/$MSLDIR" --romfs "$ROMFS")
+  if [ -n "$AOC" ] && [ -d "$AOC" ]; then STAGE+=(--aoc "$AOC"); fi
+  t "stage unsigned app with APFS clones"
+  python3 "$DM/../tools/stage_app.py" "${STAGE[@]}" || die "stage_app"
+  t "done: $OUT_IPA"
+  exit 0
 fi
 rm -rf "$APP/msl" "$O/Payload" "$O/out.ipa"   # (the last two: what the copy-and-zip packing left behind)
 P=Payload/DmIOS.app; MAPS=("$P=$APP" "$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR")

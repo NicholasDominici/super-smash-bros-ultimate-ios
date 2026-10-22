@@ -4,6 +4,7 @@
 #include <mach-o/ldsyms.h>
 #include <dlfcn.h>
 #include <time.h>
+#include <stdatomic.h>
 
 typedef struct { const char *name; void *fn; } hle_ent;
 
@@ -21,9 +22,6 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
     }
     return 0;
 }
-
-// Per module, one cache of symbol number → resolved address
-static uint64_t g_cache[MAX_MOD][8192];
 
 uint64_t resolve_import(module_t *m, const char *name) {
     static const hle_ent *sec; static unsigned long secsz;
@@ -58,41 +56,75 @@ void stubs_report(void) { LOG("stubs=%u", g_nstub); }
 // Lookup: open-addressing hash, one hit (it used to do module_of + a linear compare over 110 entries on every gate call, keyed by in-module offset, which would collide across modules).
 enum { G_SVC, G_CNTPCT, G_CNTVCT, G_OBS };
 // Observation gates (inserted offline from the rewriter's OBS table): number → read-only callback; with no callback attached the gate returns after one pass in and out
-static void (*g_obs_fn[OBS_MAX])(const uint64_t *regs); static int g_obs_have[OBS_MAX];
-void gate_obs_set(int id, void (*fn)(const uint64_t *regs)) { if (id <= 0 || id >= OBS_MAX) die("observation gate number out of range %d", id); g_obs_fn[id] = fn; }
-int gate_obs_present(int id) { return id > 0 && id < OBS_MAX && g_obs_have[id]; }
+typedef void (*obs_fn)(const uint64_t *regs);
+static _Atomic(obs_fn) g_obs_fn[OBS_MAX];
+static _Atomic unsigned g_obs_count[OBS_MAX];
+void gate_obs_set(int id, obs_fn fn) { if (id <= 0 || id >= OBS_MAX) die("observation gate number out of range %d", id); atomic_store(&g_obs_fn[id], fn); }
+int gate_obs_present(int id) { return id > 0 && id < OBS_MAX && atomic_load(&g_obs_count[id]); }
 typedef struct { uint64_t ret; int kind, arg; uint64_t orig; } gate_t;
-#define GATE_BITS 12                     // 4096 slots, gate count ≤ 1024, load factor ≤ 1/4
+#define GATE_BITS 16                     // Bounded 65536 slots; at most 16384 live registrations.
 static gate_t g_gate[1u << GATE_BITS];
 static int g_ngate;
+static pthread_rwlock_t g_gate_lock = PTHREAD_RWLOCK_INITIALIZER;
+#define GATE_TOMBSTONE UINT64_MAX
 static inline unsigned gate_h(uint64_t a) { return (unsigned)(((a >> 2) * 0x9E3779B97F4A7C15ull) >> (64 - GATE_BITS)); }
 
 void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig) {
     int k = !strcmp(kind, "svc") ? G_SVC : !strcmp(kind, "cntpct") ? G_CNTPCT : !strcmp(kind, "cntvct") ? G_CNTVCT : !strcmp(kind, "obs") ? G_OBS : -1;
     if (k < 0) die("unknown gate kind %s", kind);
-    if (k == G_OBS) { if (arg <= 0 || arg >= OBS_MAX) die("observation gate number out of range %d", arg); g_obs_have[arg] = 1; }
-    if (++g_ngate > (1 << GATE_BITS) / 4) die("gate overflow");
-    unsigned i = gate_h(ret_abs);
-    while (g_gate[i].ret) { if (g_gate[i].ret == ret_abs) die("gate registered twice %#llx", ret_abs); i = (i + 1) & ((1u << GATE_BITS) - 1); }
-    g_gate[i] = (gate_t){ret_abs, k, arg, orig};
+    if ((k == G_CNTPCT || k == G_CNTVCT) && (arg < 0 || arg > 30)) die("invalid timer gate register %d", arg);
+    if (k == G_OBS && (arg <= 0 || arg >= OBS_MAX)) die("observation gate number out of range %d", arg);
+    if (!ret_abs || ret_abs == GATE_TOMBSTONE) die("invalid gate address");
+    pthread_rwlock_wrlock(&g_gate_lock);
+    if (g_ngate >= (1 << GATE_BITS) / 4) die("gate overflow");
+    unsigned i = gate_h(ret_abs), vacant = 1u << GATE_BITS;
+    for (unsigned n = 0; n < 1u << GATE_BITS; n++, i = (i + 1) & ((1u << GATE_BITS) - 1)) {
+        if (g_gate[i].ret == ret_abs) die("gate registered twice %#llx", ret_abs);
+        if (g_gate[i].ret == GATE_TOMBSTONE && vacant == 1u << GATE_BITS) vacant = i;
+        if (!g_gate[i].ret) { if (vacant == 1u << GATE_BITS) vacant = i; break; }
+    }
+    if (vacant == 1u << GATE_BITS) die("gate table has no vacant slot");
+    g_gate[vacant] = (gate_t){ret_abs, k, arg, orig}; g_ngate++;
+    if (k == G_OBS) atomic_fetch_add(&g_obs_count[arg], 1);
+    pthread_rwlock_unlock(&g_gate_lock);
+}
+
+void gate_unregister_range(uint64_t start, uint64_t size) {
+    if (!size) return;
+    pthread_rwlock_wrlock(&g_gate_lock);
+    for (unsigned i = 0; i < 1u << GATE_BITS; i++) {
+        uint64_t address = g_gate[i].ret;
+        if (address && address != GATE_TOMBSTONE && address >= start && address - start < size) {
+            if (g_gate[i].kind == G_OBS) atomic_fetch_sub(&g_obs_count[g_gate[i].arg], 1);
+            g_gate[i].ret = GATE_TOMBSTONE; g_ngate--;
+        }
+    }
+    pthread_rwlock_unlock(&g_gate_lock);
 }
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc.c
 
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
-    for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
-        const gate_t *g = &g_gate[i];
-        if (g->ret == ret_addr) switch (g->kind) {
+    gate_t entry = {0};
+    pthread_rwlock_rdlock(&g_gate_lock);
+    for (unsigned i = gate_h(ret_addr), n = 0; n < 1u << GATE_BITS; n++, i = (i + 1) & ((1u << GATE_BITS) - 1)) {
+        if (g_gate[i].ret == ret_addr) { entry = g_gate[i]; break; }
+        if (!g_gate[i].ret) break;
+    }
+    pthread_rwlock_unlock(&g_gate_lock);
+    if (!entry.ret) die("unknown gate at %#llx", ret_addr);
+    // A copied dispatch record stays valid while another module is registered
+    // or removed. Never hold the table lock while entering a guest/HLE callback.
+    const gate_t *g = &entry;
+    switch (g->kind) {
             case G_CNTPCT: case G_CNTVCT: {
                 uint64_t t = guest_ns() * 12 / 625;    // 19.2 MHz system counter; original instruction mrs xN, cntpct_el0, arg = N
                 regs[g->arg] = t;
                 return t;
             }
-            case G_OBS: if (g_obs_fn[g->arg]) g_obs_fn[g->arg](regs); return 0;   // Registers are read-only; the x0–x8 that dm_gate writes back are the original values
+            case G_OBS: { obs_fn fn = atomic_load(&g_obs_fn[g->arg]); if (fn) fn(regs); return 0; }   // Registers are read-only; the x0–x8 that dm_gate writes back are the original values
             default: {   // register the gate frame on SVC entry / exit: it is the context of a paused thread (hle_thread.c)
                 void thr_svc_enter(uint64_t *, uint64_t), thr_svc_leave(void);
                 thr_svc_enter(regs, g->orig); uint64_t r = svc_dispatch(g->arg, regs, g->orig); thr_svc_leave(); return r; }
-        }
-        if (!g->ret) die("unknown gate at %#llx", ret_addr);
     }
 }

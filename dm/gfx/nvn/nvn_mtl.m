@@ -36,6 +36,7 @@ enum { C2_TEX = 0x20, C2_TEX_SLOTS = 41, C2_IMG = 0x120, C2_IMG_SLOTS = 8, C2_SE
 _Static_assert(C2_TEX + 8 * C2_TEX_SLOTS == C2_SEPTEX && C2_SEPTEX + 8 * 128 == C2_SAMP && C2_SAMP + 8 * 128 <= DRV_SIZE && NVN_SEPTEX_SLOT0 + 128 == NTEX, "NVN driver handle tables");
 static int c0_ssbo_base(int stage) { return stage == 0 ? 0x110 : stage == 1 ? 0x510 : stage == 5 ? 0x310 : -1; }   // NVN stages 0 vertex, 1 pixel, 5 compute; geometry / hull / domain never seen
 #include "nvn_hmap.h"
+#include "nvn_program_cache.h"
 #include "../../host/dm.h"
 #import <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
@@ -2582,7 +2583,7 @@ static void shmap_load(void) {
 - (void)dealloc { free(rf.c1); }
 @end
 #include "nvn_pso_skey.h"
-@interface NvProg : NSObject { @public NvShader *sh[6]; } @end
+@interface NvProg : NSObject { @public NvShader *sh[6]; int unsupported_geometry; } @end
 @implementation NvProg @end
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
 @interface WarmItem : NSObject { @public int kind; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end
@@ -2827,15 +2828,20 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
             NvShader *b = builtin_get(k.UTF8String);
             if (b) { o->sh[5] = b; continue; }
             MLOG("[RED] shader %s is not in the shader map (DM_NVN_SHDUMP=directory saves its control section and code area)", k.UTF8String);
-            // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (0x880-byte control section) and <key>.code (code area, length from control +0x704), to trace their source / add them to the map offline
-            static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; }
-            if (shd) { char path[1024]; FILE *f; uint32_t ncode; memcpy(&ncode, (const uint8_t *)p->sd[i].control + 0x704, 4);   // with SHDUMP set the control section is the host's copy
-                snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, 0x880, f); fclose(f); }
-                snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
-                if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
+            nvn_shdump_draw(p, i); // Shared exact-byte writer; also resolves deferred registrations.
+
             continue;
         }
         int st = stage_of(stage);
+        if ([stage isEqualToString:@"geometry"]) {
+            // Metal has no direct geometry stage. Until compute emulation is
+            // implemented, preserve this requirement rather than silently
+            // linking its VS directly to a fragment shader with different
+            // varyings (Smash CharacterDamageModel_Far requires real GS work).
+            o->unsupported_geometry = 1;
+            MLOG("[RED] geometry shader %s requires compute emulation; its affected draws will be skipped", k.UTF8String);
+            continue;
+        }
         NvShader *sh = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st) : nil;
         if (sh) o->sh[st] = sh; else MLOG("[RED] shader %s (%s) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first", k.UTF8String, stage.UTF8String);
     }
@@ -3176,19 +3182,21 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
     if (!v) return NULL;
     int same = 1; for (int st = 1; st < 5; st++) if (S.bst[st] && S.bst[st] != v) same = 0;
     if (same && S.bst[1] == v) return v;
-    enum { NCMP = 64 };
-    static prog_t cp[NCMP]; static const prog_t *ck[NCMP][5]; static uint64_t cs[NCMP][5]; static int ncp, next;
-    for (int i = 0; i < ncp; i++) {
-        int hit = 1; for (int st = 0; st < 5 && hit; st++) hit = ck[i][st] == S.bst[st] && (!S.bst[st] || cs[i][st] == S.bst[st]->serial);
-        if (hit) return &cp[i];
-    }
-    int i = ncp < NCMP ? ncp++ : next++ % NCMP;
-    if (cp[i].serial) serial_del(cp[i].serial);
+    // S.prog is also held by lookahead saves, deferred draws and coverage probes.
+    // A ring slot cannot be recycled: prediction used to overwrite a saved
+    // prog_t and delete its resolved NvProg while callers still referenced both.
+    // Intern immutable records for the session, keyed by original stage serials.
+    static nvn_program_cache composites;
+    nvn_program_key key = {0};
+    for (int st = 0; st < 5; st++) key.stage_serial[st] = S.bst[st] ? S.bst[st]->serial : 0;
+    int created;
+    prog_t *combined = nvn_program_cache_intern(&composites, &key, sizeof *combined, &created);
+    if (!created) return combined;
     NvProg *o = [NvProg new];
-    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; } }
-    memset(&cp[i], 0, sizeof cp[i]); cp[i].magic = MAGIC('P', 'R', 'O', 'G'); cp[i].serial = nvn_new_serial(); serial_put(cp[i].serial, o);
+    for (int st = 0; st < 5; st++) if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; if (st == 2 && src) o->unsupported_geometry = src->unsupported_geometry; }
+    combined->magic = MAGIC('P', 'R', 'O', 'G'); combined->serial = nvn_new_serial(); serial_put(combined->serial, o);
     { static int once; if (!once++) MLOG("per-stage program binding: first combined program (vertex %s fragment %s)", o->sh[0] ? o->sh[0]->key : "-", o->sh[1] ? o->sh[1]->key : "-"); }
-    return &cp[i];
+    return combined;
 }
 static void state_reset(void) {
     memset(&S, 0, sizeof S);
@@ -3604,6 +3612,7 @@ static const char *pso_fout_hint(NvShader *fs, const uint32_t cfmt[8], char *b, 
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRenderPassDescriptor *unused) { AP_B; __unsafe_unretained id<MTLRenderPipelineState> r = pso_get_(pr, unused); AP_E(2); return r; }
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused) {
     (void)unused;
+    if (pr->unsupported_geometry && S.bst[2]) return nil;
     __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     if (!vs) { RED_ONCE(13, "program has no vertex shader (or it is not mapped)"); return nil; }
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, g_pso_lmap != NULL);

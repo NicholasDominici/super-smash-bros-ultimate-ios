@@ -1,203 +1,222 @@
-# Super Mario Odyssey for iPhone and iPad
+# Super Smash Bros. Ultimate for iPhone and iPad
 
-[![Source checks](https://github.com/NicholasDominici/super-mario-odyssey-ios/actions/workflows/checks.yml/badge.svg)](https://github.com/NicholasDominici/super-mario-odyssey-ios/actions/workflows/checks.yml)
+An experimental native Apple Silicon port of **Super Smash Bros. Ultimate
+13.0.5**, built on [nxnative](https://github.com/seedds/nxnative) and the
+[Odyssey iOS port](https://github.com/NicholasDominici/super-mario-odyssey-ios).
+The game code is rewritten on your Mac and signed into the app; there is no
+runtime JIT or jailbreak requirement.
 
-Super Mario Odyssey running natively on Apple Silicon, with Metal graphics,
-touch controls, physical controller motion, and DualSense haptics and adaptive
-triggers. No JIT or jailbreak. Built on [nxnative](https://github.com/seedds/nxnative).
+**This is a bring-up project.** Native Mac tests demonstrate movement, jumps,
+attacks, CPU combat, damage and knockouts. The latest Kirby/Donkey Kong combat
+run reported no rendering errors or missing shader keys. One known geometry
+shader remains unsupported. Physical iPad gameplay,
+two-controller matches, controller feel, sustained performance and Smash iCloud
+handoffs have not yet been verified. Read [the current limits](docs/VALIDATION.md)
+before spending time on a build.
 
-Provide your own **base game, update 1.4.1, and console keys**. The build tools
-prepare everything locally on your Mac. This repository contains the port's
-source and tools; it does not contain Nintendo assets.
+You provide your own **base-game NSP or XCI, update 13.0.5 NSP, and console
+keys**. This repository contains source, tools and metadata. It contains no
+game, executable game modules, shaders, keys, saves or installable game IPA.
 
-I've been playing on an **iPad Pro 13-inch (M5)** and **iPhone 17 Pro Max** on
-iPadOS/iOS 27. Picture, sound, controls, motion and the main controller effects
-have been tested in gameplay. [Installation](#install-it-yourself)
+## Implemented in source
 
-## What this adds
+- A native iOS runtime and Metal shader build path, including Smash's dynamically
+  loaded fighter modules and targeted SSBH, UI and effect-shader extraction from
+  `data.arc`.
+- **Two local players on one device**, using independent compatible extended
+  gamepads. Mixed controller models are supported by the adapter.
+- The game's authored left/right vibration, routed to the correct controller.
+- **DualSense adaptive triggers**: light resistance during actual shielding and
+  a short impact thump when a shield blocks a hit. Effects honor each player's
+  custom Guard mapping and stop on release, expiry, disconnect or backgrounding.
+- Per-controller motion transport where hardware and the game support it.
+- Optional background **iCloud saves**, using your own developer container.
+- An optional generated-frame presentation path; gameplay simulation stays at
+  60 Hz. This is not native 120 FPS rendering and is off by default for Smash.
 
-- A **4:3 iPad view** with corrected camera projection, HUD, dialogue backgrounds
-  and screen transitions. Mario and circular icons keep their proportions.
-- A separate **239:110 iPhone view**, matched to the tested iPhone 17 Pro Max.
-- **Shake-to-throw Cappy**, using a compatible physical controller's motion sensors.
-- The game's original left/right vibration patterns, translated to controller haptics.
-- **PS5 DualSense Support** Complete with haptic engine mappings and adaptive trigger feedback.
-- Optional **up to 120 displayed FPS** through frame interpolation on supported
-  devices.
-- Private **iCloud save sync**, under your own developer team's container.
+These are implementation features, not a claim that every path has passed
+physical gameplay testing. [Controller details](docs/CONTROLLERS.md) and
+[iCloud setup](docs/ICLOUD.md) describe the boundaries.
 
-## Controls
+## Picture, saves and updates
 
-Connect a controller in **Settings → Bluetooth** before opening the game.
+The current build preserves the game's **16:9 composition**. An iPad can show
+borders. A corrected native iPad/iPhone camera and HUD layout is not implemented;
+stretching the image would distort both. Native display-pixel rendering and
+stable 60/120 FPS on a particular device are not guaranteed.
 
-Use the sticks to move and look, the face buttons to jump/throw Cappy, and
-L2/R2 to crouch or roll. Shake the controller for
-motion actions. Touch controls are available too, but physical-controller motion
-and adaptive triggers require the appropriate hardware.
+Local progress lives in the app's `Documents/save` folder, accessible through
+Files or Finder file sharing. Save in-game, fully close the app and back up that
+folder before an update. Keep the same bundle ID and signing team. Deleting the
+app removes its local container. The build tool does not install anything; the
+separate signing tool installs only when you pass `--install`.
 
-## Display and performance
+Cloud sync is **off by default** and experimental for Smash. It captures completed
+save commits, publishes whole verified snapshots and imports only before game
+boot. Use one device at a time, wait for an acknowledged upload, then close it
+before switching. See [ICLOUD.md](docs/ICLOUD.md).
 
-Choose `--preset ipad` for **4:3**, or `--preset iphone` for **239:110**.
-These are explicit presets, not automatic detection of every iPhone or iPad.
-Other screen shapes may have borders. Changing only the display size or stretching
-the final image will distort the game; the build also prepares matching camera
-and HUD changes.
+## Development and reporting
 
-The internal raster remains **1600 × 900**. Full-screen aspect does not mean
-native display-pixel rendering. On the tested ProMotion devices the FPS overlay
-can show around 120 with `FG`; roughly half those frames are generated. This
-doesn't double physics speed or mean the GPU renders 120 original game frames.
-Interpolation can introduce visual artifacts and latency and falls back when
-unsupported. Use `--frame-generation off` to turn it off, or `--show-fps` to see
-the counter. See [validation and limitations](docs/VALIDATION.md).
+The player command is `tools/smash.py`; signing uses `tools/sign_install.py`.
+The source profile is `dm/games/01006A800016E000/`. Build output and a mutable
+profile are created in a new private directory outside the checkout. Advanced
+users can reuse their own verified extraction, rewritten modules and shader
+cache; see [INPUTS.md](docs/INPUTS.md).
 
-## Saves and updates
-
-Progress lives in `Documents/save`, visible through the app's folder in Files
-or Finder file sharing. **Back it up before deleting or replacing the app.**
-Keep the same bundle ID and signing team when updating; deleting the app removes
-its local container. The build/install tools don't delete an installed app or
-launch it automatically. Save and fully close it before installing an update.
-
-iCloud is **off by default**. Enable it only after following
-[the iCloud setup guide](docs/ICLOUD.md), using the same container and environment
-on both devices. Saves upload in the background after completed game commits;
-there is no permanent sync button. Cloud imports happen before the game boots.
-Use one device at a time and close it before switching.
-
-An iPad-to-iPhone handoff has been verified. Some later phone save captures
-failed intermittently; a tested interrupted-read fix and better diagnostics are
-included, but its live follow-up and reverse handoff remain unverified. Keep
-local backups and treat cloud sync as experimental.
-
-## Building and contributing
-
-The supported inputs are the base game (**NSP or XCI**) plus **update 1.4.1 (`v393216`)**,
-title ID `0100000000010000`. The tools check exact module hashes/build IDs and
-reject other versions. [Input details and extracted-folder support](docs/INPUTS.md)
-cover the same files used for the tested builds.
-
-The player-facing entry point is `tools/odyssey.py`. It uses the shared runtime
-in `dm/`, the exact-build profile in `dm/games/0100000000010000/`, and structural
-HUD preparation in `tools/prepare_odyssey_*.py`. All extracted files, rewritten
-game modules, shader caches, signing profiles and IPAs stay outside the checkout.
-
-Run checks without any game files:
+Run game-free source checks with:
 
 ```sh
 python3 tools/check.py
 ```
 
-For changes to binary observers, shaders or rendering, see
-[AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md) and the
-[runtime development guide](docs/development.md). A source test passing is not
-proof of gameplay performance or how a physical controller feels.
+Read [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md) and
+[VALIDATION.md](docs/VALIDATION.md) before changing the runtime. Existing Odyssey
+helpers and tests remain as inherited regression coverage; use `smash.py` for
+this game.
 
-## Reporting bugs
+[Report an issue](https://github.com/NicholasDominici/super-smash-bros-ultimate-ios/issues)
+with the source commit, game version, device/OS, controller model and the action
+that failed. Private receipts and diagnostics help with investigation. Remove
+account/device details before sharing excerpts. Never attach game files, saves,
+keys, provisioning material or a game-bearing app/IPA.
 
-[Open an issue](https://github.com/NicholasDominici/super-mario-odyssey-ios/issues)
-with your device, OS version, port commit, game version, display preset and what
-you were doing. The app's `log.txt` and diagnostics are in its Files folder.
-Remove account/device details before posting; don't attach game files, keys,
-saves or provisioning profiles.
-
-## Credits
+## Credits and license
 
 - [seedds/nxnative](https://github.com/seedds/nxnative): native runtime, offline
-  code rewriting, graphics translation, build tooling, and the original game profile.
+  rewriting, graphics translation and original build tools.
 - [ly05010419/MacNativeGames](https://github.com/ly05010419/MacNativeGames): work
-  used by nxnative; its license and notices are retained.
-- [fayaz12g/smo-aar](https://github.com/fayaz12g/smo-aar/tree/e8fd670d1faeab3d8c4904177928bcfd14afb42c):
-  the aspect-ratio approach, reimplemented here with structural archive checks.
-- [Ryujinx and the other dependencies](dm/third_party/README.md): shader
-  translation, codecs, headers and utilities, under their respective licenses.
+  used by nxnative; retained license and notices.
+- [Super Mario Odyssey iOS](https://github.com/NicholasDominici/super-mario-odyssey-ios):
+  the inherited controller, presentation, cloud and human-installation foundation.
+- [smash-arc](https://github.com/jam1garner/smash-arc) and
+  [ssbh_lib](https://github.com/ultimate-research/ssbh_lib): ARC format APIs and
+  primary SSBH format definitions used by the targeted extraction tools.
+- [KillzXGaming/EffectLibrary](https://github.com/KillzXGaming/EffectLibrary/tree/d5491138d645221ec92189eeff3ded8c43fd0a1a):
+  MIT-licensed EFFN/EFT2 format layouts used by the bounded effect-shader reader.
+- [Ryujinx and other dependencies](dm/third_party/README.md): shader translation,
+  codecs, headers and utilities under their own licenses.
 
-Port source is MIT; see [LICENSE](LICENSE) and [source provenance](docs/PROVENANCE.md).
-This is an unofficial fan project. Super Mario Odyssey and its game content
-belong to Nintendo. The game and its assets are not covered by this source license.
+Port source is MIT; see [LICENSE](LICENSE) and [PROVENANCE.md](docs/PROVENANCE.md).
+This is an unofficial fan project. Nintendo's game, content and trademarks are
+not covered by the source license.
 
 ## Install it yourself
 
-You don't need Codex, Claude, or another AI assistant. You need an Apple Silicon
-Mac, **Xcode 27 or newer**, an iPhone/iPad on **iOS/iPadOS 26 or newer**, your own
-game files and keys, and a developer account capable of signing with
-**Increased Memory Limit**. The tested signing path uses a paid Apple Developer
-team. Free-account sideloading and lower-memory devices haven't been validated.
-Allow about **40 GB free on the Mac** for game files, caches and packaging and
-**12 GB on the device** for installation headroom; actual requirements vary.
+No AI assistant is required. You need an **Apple Silicon Mac**, **Xcode 27 or
+newer**, an iPhone/iPad on **iOS/iPadOS 26 or newer**, your own game files and keys,
+and a developer team able to provision **Increased Memory Limit and Extended
+Virtual Addressing**. The development-signing path uses a paid Apple Developer
+team. Free-team signing and lower-memory devices are unverified. The game's
+merged archive alone is about 17.6 GB; allow substantial additional space for
+input packages, extraction, shader caches, app staging and device installation.
 
-1. **Prepare the Mac.** Install and open Xcode, accept its license, and sign in
-   under **Xcode → Settings → Apple Accounts**. Select that Xcode under
-   **Settings → Locations → Command Line Tools**. Install
-   [Homebrew](https://brew.sh/) if you don't already have it, then run:
+1. **Prepare Xcode and tools.** Open Xcode, accept its license, finish component
+   installation and sign in under **Xcode → Settings → Apple Accounts**. Select
+   it under **Settings → Locations → Command Line Tools**. With
+   [Homebrew](https://brew.sh/) installed, run:
 
    ```sh
-   brew install python xcodegen spirv-cross zstd
+   xcodebuild -downloadComponent MetalToolchain
+   brew install python rust xcodegen spirv-cross zstd
    brew install --cask dotnet-sdk
    ```
 
-   The tools require **.NET 10**. If you install a newer SDK, also install the
-   [.NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0) so the
-   pinned shader translator's .NET 10 runtime is available.
+   Also install the [.NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
+   if your default SDK is newer. The pinned translator requires the .NET 10 runtime.
+   The Metal compiler and `spirv-cross` must match `dmsh_chain.lock`; a mismatch
+   stops the build instead of silently changing shader fingerprints. See the
+   [pinned toolchain versions](docs/INSTALL.md).
 
-2. **Download the source and prepare Python.** Open Terminal and run:
+2. **Get the source and Python dependencies.** In Terminal:
 
    ```sh
-   git clone https://github.com/NicholasDominici/super-mario-odyssey-ios.git
-   cd super-mario-odyssey-ios
+   git clone https://github.com/NicholasDominici/super-smash-bros-ultimate-ios.git
+   cd super-smash-bros-ultimate-ios
    python3 -m venv .venv
    source .venv/bin/activate
    python -m pip install -r requirements.txt
    ```
 
-3. **Put your game files together.** Create a folder outside the source repo,
-   such as `~/Games/Odyssey`. Put your base-game **NSP or XCI** and update **1.4.1 NSP**
-   there. Keep your `prod.keys` elsewhere, such as `~/Games/Keys/prod.keys`.
-   Only one game's files should be in the folder. Don't rename a different
-   update to 1.4.1; its actual build will be checked.
+3. **Prepare your files.** Put your unmodified base-game `.nsp` or `.xci`, update
+   **13.0.5 (`v2031616`) `.nsp`**, and your `prod.keys` outside the source folder.
+   Unpack your own ZIP/7z/RAR containers first. The actual module hashes are
+   checked; renaming a different update will not work.
 
-4. **Build your private IPA.** Replace the example paths below. Choose a bundle
-   ID you control and keep it for future updates. For the tested 4:3 iPad:
+   <details>
+   <summary>Optional: unpack .7z or multipart RAR files</summary>
+
+   Replace these example paths, keeping the quotes:
 
    ```sh
-   python tools/odyssey.py \
-     --nsp-dir "$HOME/Games/Odyssey" \
-     --keys "$HOME/Games/Keys/prod.keys" \
-     --preset ipad \
-     --bundle-id com.yourname.odyssey \
-     --output "$HOME/Games/Odyssey-ipad-unsigned.ipa"
+   brew install sevenzip
+   7zz x "/path/to/Base.7z" -o"/path/to/Unpacked"
+   7zz x "/path/to/Update.part1.rar" -o"/path/to/Unpacked"
    ```
 
-   For the tested iPhone 17 Pro Max layout, change `--preset ipad` to
-   `--preset iphone` and use a different output filename. The first build takes
-   longer because it prepares shaders. The last line prints the IPA's path.
-   That IPA contains your game files; keep it private.
+   Keep every RAR volume together with its original filename, and extract the
+   first volume once. Depending on the naming scheme, it may end in
+   `.part1.rar`, `.part01.rar`, or `.rar` followed by `.r00`, `.r01`, etc.
+   Use the resulting NSP/XCI paths in step 4; the builder does not accept the
+   compressed archives themselves.
 
-5. **Connect and prepare the device.** Connect it by USB, unlock it and tap
-   **Trust**. Enable **Settings → Privacy & Security → Developer Mode**, then
-   restart if prompted. Run `xcrun devicectl list devices` in Terminal and copy
-   your device's identifier. Find your Team ID in your Apple Developer account's
-   Membership details. [Signing help](docs/INSTALL.md) covers common errors.
+   </details>
 
-6. **Sign and install.** Replace `YOUR_TEAM_ID`, `YOUR_DEVICE_ID` and the IPA path:
+4. **Build an unsigned app.** Replace the example paths and choose a bundle ID
+   you control. `--work` must name a **new** directory for each build:
+
+   ```sh
+   python tools/smash.py \
+     --base "$HOME/Games/Smash/Base.xci" \
+     --update "$HOME/Games/Smash/Update-13.0.5.nsp" \
+     --keys "$HOME/Games/Keys/prod.keys" \
+     --bundle-id com.yourname.smash \
+     --work "$HOME/Games/Smash-build-01" \
+     --app-only \
+     --allow-known-geometry-gap
+   ```
+
+   Static extraction includes the game's UI and particle-effect shader carriers.
+   Optional bounded native capture is available for diagnostics; see
+   [INPUTS.md](docs/INPUTS.md). It is not required for the known registered and
+   battle shader keys covered by the current static sources.
+   The last flag explicitly accepts the one documented unsupported geometry
+   shader. Other failed or missing shaders still stop packaging. The first build
+   extracts the game, rewrites its modules and compiles shaders; detailed logs
+   stay in the private work directory. This project still has the graphics and
+   live-test limitations described above. The final line prints the unsigned
+   app path. It contains your game files and must stay private.
+
+5. **Prepare the device and signing capabilities.** Connect by USB, unlock it,
+   trust the Mac and enable **Settings → Privacy & Security → Developer Mode**.
+   Run `xcrun devicectl list devices`. In your developer account, use an explicit
+   App ID matching `com.yourname.smash` with **Increased Memory Limit** and
+   **Extended Virtual Addressing** enabled. [INSTALL.md](docs/INSTALL.md) explains
+   profile setup and how to obtain the hardware UDID.
+
+6. **Sign and install.** Replace the team and device identifiers:
 
    ```sh
    python tools/sign_install.py \
-     --ipa "$HOME/Games/Odyssey-ipad-unsigned.ipa" \
+     --app "$HOME/Games/Smash-build-01/SuperSmashBrosUltimate-unsigned.app" \
      --team YOUR_TEAM_ID \
      --device YOUR_DEVICE_ID \
      --install
    ```
 
-   Xcode obtains a development profile for that device, the helper checks its
-   memory entitlement, and then signs and installs the game. If Xcode reports a
-   missing capability, follow [the profile setup steps](docs/INSTALL.md#profile-setup)
-   and rerun using `--profile`. A signed IPA is also saved next to the unsigned one.
-   Merely tapping an IPA in Files doesn't install it; development builds run only
-   on devices allowed by their profile, and must be renewed when signing expires.
+   Xcode obtains a development profile. The helper validates both required
+   capabilities, signs a separate copy, checks its entitlements and installs it.
+   If automatic provisioning fails, use an exact-app profile with `--profile`;
+   see [signing help](docs/INSTALL.md). It does not delete or launch an existing app.
 
-7. **Open Super Mario Odyssey and play.** Pair your controller, choose Start or
-   Continue, and test movement, sound and a few jumps. When updating later, make
-   an in-game save, fully close the app, back up its `save` folder, and repeat
-   steps 4–6 with the same bundle ID and signing team. Optional iCloud setup is
-   in [docs/ICLOUD.md](docs/ICLOUD.md).
+7. **Open and test the game.** Pair your controllers in Settings → Bluetooth.
+   Test picture, sound, movement and a local match before relying on this build.
+   Save and back up progress before future updates. Reuse the same bundle ID
+   and signing team. Optional cloud setup is in [ICLOUD.md](docs/ICLOUD.md).
+
+8. **Use an IPA when needed.** Omit `--app-only` in step 4 to produce a private
+   unsigned IPA, then pass it to the signer with `--ipa` instead of `--app`.
+   Sending an IPA by AirDrop does not install it: a development-signed build runs
+   only on devices in its provisioning profile. A friend can build independently
+   with their own files/account, or you can register their device and sign with
+   a suitable profile. Never publish the resulting game-bearing IPA.

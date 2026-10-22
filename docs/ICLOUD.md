@@ -1,61 +1,67 @@
 # Optional iCloud saves
 
-Local saves work without any CloudKit setup. Cloud sync is experimental; see
-VALIDATION.md. It uploads complete game save commits quietly and imports remote
-progress only before the game starts. A local committed snapshot is kept first.
+Cloud sync is **off by default**. The inherited coordinator uploads whole,
+verified completed save snapshots quietly and imports remote progress only
+before game boot. Local saves remain available without CloudKit setup.
+**A real Smash save upload and two-device handoff have not yet been verified.**
+Do not infer them from the Odyssey port's earlier tests or from successful signing.
 
-## Set up your own container
+## Your own container
 
-1. Use your own paid developer team's explicit App ID and a bundle ID you control,
-   such as `com.yourname.odyssey`. Keep them the same across your devices.
-2. In your Apple Developer account, enable iCloud/CloudKit on that App ID and
-   create/associate `iCloud.com.yourname.odyssey`.
-3. Build both display variants with the same extra option:
+1. Use a bundle ID you control, such as `com.yourname.smash`, under your own
+   developer team. Keep that bundle/team identity across devices and updates.
+2. In your Apple Developer account, enable iCloud → CloudKit on that explicit
+   App ID and associate your own container, such as `iCloud.com.yourname.smash`.
+   Keep both required memory/addressing capabilities enabled too.
+3. Add the same container option when building each device's app:
 
    ```sh
-   python tools/odyssey.py --nsp-dir /path/to/Odyssey --keys /path/to/prod.keys \
-     --preset ipad --bundle-id com.yourname.odyssey \
-     --cloud-container iCloud.com.yourname.odyssey \
-     --output /path/to/Odyssey-ipad-cloud-unsigned.ipa
+   python tools/smash.py --base /private/Smash/Base.xci \
+     --update /private/Smash/Update-13.0.5.nsp --keys /private/Keys/prod.keys \
+     --bundle-id com.yourname.smash --cloud-container iCloud.com.yourname.smash \
+     --work /private/Smash-cloud-build-01 --app-only \
+     --allow-known-geometry-gap
    ```
 
-   Use `--preset iphone` and a different output path for the other device.
-4. Sign with tools/sign_install.py. Its development profile must include that
-   exact container, CloudKit service, Development environment, memory capability,
-   and the target device. An existing profile can be passed with `--profile`.
-5. Sign both devices into the same iCloud account. Launch the device with your
-   current progress first, save in-game, and let it remain open with a connection
-   until `Documents/cloud-save/status.json` acknowledges the local digest.
-   `log.txt` also records sync failures. Close it before starting the other device.
-6. Launch the second device. Its first cloud restore runs before game boot.
-   Back up `Documents/save` on both devices while testing the handoff.
+   The container is written only to the private generated profile. The public
+   source profile stays cloud-disabled.
+4. Sign with `tools/sign_install.py`. Its exact-app development profile must
+   permit that container, CloudKit, the **Development** environment, both required
+   capabilities and the device. Use `--profile` if automatic provisioning fails.
+5. Sign both devices into the same iCloud account. Back up their local save
+   folders before testing. Start the device with current progress, save in-game
+   and leave it running with a connection until `Documents/cloud-save/status.json`
+   acknowledges the local digest. Then fully close it before opening the other.
+6. Verify the second device imports the same digest before boot and loads the
+   expected progress. Test the return direction separately. A queued upload or
+   an installed CloudKit entitlement does not establish delivery.
 
 The private database uses record type **GameSave**, record name
-`0100000000010000-save-format-1`, fields `payload` (Asset), `digest` (String),
-`device` (String), and `updated` (Date/Time). Development CloudKit can create this
-schema while testing; use [CloudKit Console](https://icloud.developer.apple.com/)
-to inspect it. No public queries or record sharing are required.
+`01006A800016E000-save-format-1`, and fields `payload` (Asset), `digest` (String),
+`device` (String), and `updated` (Date/Time). Development CloudKit can create the
+schema during testing. Use [CloudKit Console](https://icloud.developer.apple.com/)
+to inspect your own private development database; public sharing is not required.
 
-This signing helper intentionally uses Development. Production is a separate
-environment. Before implementing distribution, follow Apple's
-[schema deployment guide](https://developer.apple.com/documentation/cloudkit/deploying-an-icloud-container-s-schema),
-test the deployed schema and migration, and use a matching distribution profile.
-Changing environments does not move an existing save automatically.
+## Consistency and conflicts
 
-## Switching devices and conflicts
+The source preserves complete-commit capture, SHA-256 integrity verification,
+account pinning, compare-and-swap cloud writes, conflict backups and explicit
+conflict choices. A cloud restore never overwrites a mounted live save.
+The Smash profile requires `save_data/system_data.bin` before publishing a
+progress snapshot; the path comes from the original executable. A disposable
+Mac match produced the real five-file save set, which the production archive
+codec captured and restored with an identical digest. Completed-save upload,
+account/network behavior and physical-device handoffs remain unverified.
 
-Play on one device at a time. Save, allow upload to finish, close it, then open
-the other device. Background execution and network availability are controlled
-by iOS, so an immediate force-close can interrupt an outstanding upload. The
-coordinator retries later; it doesn't promise instant delivery while suspended.
+Play on one device at a time. Save, wait for acknowledgement, close it, then
+switch. iOS controls background execution and networking; an immediate force-close
+can interrupt an outstanding upload. Different iCloud accounts have separate
+private saves. Account changes do not silently publish old-account progress to
+another account. Divergent changes require an explicit conflict choice, with
+alternatives backed up. Offline local play does not require cloud delivery.
 
-Different Apple accounts have separate private saves. If the account changes,
-the coordinator doesn't silently publish the previous account's progress to it.
-If both devices changed independently, a conflict needs an explicit choice and
-the alternatives are backed up. Remote files never replace the live mounted save.
-Offline play with a valid local save is supported. A fresh device unable to
-reach iCloud offers retry or an explicit start without iCloud.
-
-The source contains the snapshot integrity, conflict and compare-and-swap tests.
-Those tests don't substitute for testing your own provisioning, account, schema,
-network, background behavior, and both directions of an actual device handoff.
+The signing helper uses Development. Production is separate and requires a
+matching distribution flow and [deployed schema](https://developer.apple.com/documentation/cloudkit/deploying-an-icloud-container-s-schema).
+Changing an entitlement does not move existing cloud records between environments.
+Cloud unit/transport tests do not replace provisioning, account, network,
+background/retry, real save capture and bidirectional physical-device tests.

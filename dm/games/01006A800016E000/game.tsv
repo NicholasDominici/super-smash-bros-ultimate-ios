@@ -1,0 +1,32 @@
+# Super Smash Bros. Ultimate 13.0.5. Bring-up profile; gameplay is not yet validated.
+# Identity/builds measured from the player's base XCI plus cumulative update.
+title_id	01006A800016E000
+program_id	01006A800016E000
+name	Super Smash Bros. Ultimate
+ipa	SuperSmashBrosUltimate.ipa
+app_category	public.app-category.action-games
+pad_layout	full
+local_players	2
+op_mode	console
+# Preserve the game's composition until both camera and HUD can be corrected.
+display_aspect	16:9
+frame_generation	off
+# Main references save:/save_data/system_data.bin. Require this progress file
+# before publishing a whole committed snapshot; verify its live creation at boot.
+cloud_required_files	save_data/system_data.bin
+extended_virtual_addressing	on
+build	v2031616	13.0.5	main=21450c647b8c5940ed5b68218ea128fd	subsdk0=60c6edbbfcebd4176cc301d5d9cb5a6f	sdk=5fd4f531c1195e9e5510c9e73f22cd39
+package	v2031616
+shader_versions	v2031616
+modules	main subsdk0 sdk
+romfs_marker	data.arc
+zip_store	.arc:.nrr:.metallib
+# Main's allocator reserves 0xf80000000 (62 GiB) of virtual address space at
+# main+0x37c9a58. This is sparse address space, not resident physical memory.
+# Leave room for SDK address-region bookkeeping plus the normal physical heap.
+mem_reserve	0x1100000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+shader_groups	/data.arc=arc /render/=render
+shader_note	Super Smash Bros. Ultimate shaders

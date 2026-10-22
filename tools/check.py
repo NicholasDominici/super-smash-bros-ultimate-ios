@@ -26,12 +26,39 @@ def main():
                   '-I', ROOT / 'dm/host/gen/0100000000010000', '-I', ROOT / 'dm/games/0100000000010000']
         for name, sources in [
             ('feedback', ['dm/host/tests/t_feedback.c', 'dm/host/hle_feedback.c']),
+            ('feedback-players', ['dm/host/tests/t_feedback_players.c', 'dm/host/hle_feedback.c']),
+            ('smash-feedback', ['dm/host/tests/t_smash_feedback.c', 'dm/host/hle_feedback.c']),
+            ('guest-read', ['dm/host/tests/t_guest_read.c']),
+            ('nvn-command-pools', ['dm/host/tests/t_nvn_cb_pool.c']),
+            ('nvn-program-cache', ['dm/host/tests/t_nvn_program_cache.c']),
             ('policy', ['dm/host/tests/t_feedback_policy.c']),
             ('takeoffs', ['dm/host/tests/t_odyssey_feedback.c']),
             ('aspect', ['dm/host/tests/t_present_aspect.c']),
         ]:
             binary = build / name
             run(common + sources + ['-o', binary])
+            run([binary])
+        for name, flags in [('hid-players', []), ('hid-legacy', ['-DDM_TEST_SINGLE_PLAYER'])]:
+            binary = build / name
+            run(common + ['-Wno-unused-function', *flags, 'dm/host/tests/t_hid_players.c',
+                          'dm/host/hle_feedback.c', '-o', binary])
+            run([binary])
+        binary = build / 'feedback-players-threads'
+        run(common + ['-fsanitize=thread', 'dm/host/tests/t_feedback_players_threads.c',
+                      'dm/host/hle_feedback.c', '-o', binary])
+        run([binary])
+        binary = build / 'nvn-program-cache-address'
+        run(common + ['-fsanitize=address,undefined', 'dm/host/tests/t_nvn_program_cache.c', '-o', binary])
+        run([binary])
+        binary = build / 'nvn-command-pools-threads'
+        run(common + ['-fsanitize=thread', 'dm/host/tests/t_nvn_cb_pool.c', '-o', binary])
+        run([binary])
+        for name, source, flags in [
+            ('smash-feedback-threads', 'dm/host/tests/t_smash_feedback.c', ['-DDM_SMASH_STRESS']),
+            ('hid-players-threads', 'dm/host/tests/t_hid_players.c', ['-DDM_HID_STRESS', '-Wno-unused-function']),
+        ]:
+            binary = build / name
+            run(common + ['-fsanitize=thread', *flags, source, 'dm/host/hle_feedback.c', '-o', binary])
             run([binary])
         for name, flags in [('save-commit', ['-DDM_TEST_SAVE_COMMIT']), ('save-commit-mac', [])]:
             binary = build / name

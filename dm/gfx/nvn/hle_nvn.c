@@ -91,7 +91,14 @@ static void nvn_init_slots(void) {
     g_nsem = hit;
 }
 
+// Optional NVX debugger control is independent of rendering. Smash's NVN
+// initialization resolves it and supplies one boolean; no return is consumed.
+// The host has no external GPU debugger transport to enable.
+static void nvn_external_debugger(uint32_t enabled) { (void)enabled; }
+
 static void *nvn_lookup(const char *name) {
+    if (!name) return NULL;
+    if (!strcmp(name, "nvnSetExternalDebuggerEnabledNVX")) return (void *)nvn_external_debugger;
     nvn_init_slots();
     for (unsigned i = 0; i < NVN_NFUNC; i++)
         if (!strcmp(nvn_names[i], name)) return nvn_thunk[i];
@@ -217,15 +224,11 @@ static int dpool_add(struct dpool_base *t, int *nt, int *next, const void *pool,
     int b = t[i].base; pthread_mutex_unlock(&g_dpool_mu); return b;
 }
 static int dpool_base(const struct dpool_base *t, int nt, const void *pool) { for (int i = 0; i < nt; i++) if (t[i].pool == pool) return t[i].base; return 0; }
-// The pools each command buffer last bound, as bases (only command buffers that bound a pool other than the first one of its kind are listed)
-static struct { const void *cmd; int tb, sb; } g_cbpool[64]; static int g_ncbpool;
+// Smash records more than 64 live command buffers. Keep per-buffer numbering
+// outside the guest object and remove it when the object is finalized/reused.
+#include "nvn_cb_pool.h"
 static void cb_pool_set(const void *c, int tex, int base) {
-    pthread_mutex_lock(&g_dpool_mu);
-    int i = 0; while (i < g_ncbpool && g_cbpool[i].cmd != c) i++;
-    if (i == g_ncbpool && base && g_ncbpool < 64) g_cbpool[g_ncbpool++] = (typeof(g_cbpool[0])){c, 0, 0};
-    if (i < g_ncbpool) { if (tex) g_cbpool[i].tb = base; else g_cbpool[i].sb = base; }
-    else if (base) LOG("[RED] more than 64 command buffers bound a non-first descriptor pool: the extra ones count as the first pool");
-    pthread_mutex_unlock(&g_dpool_mu);
+    if (!nvn_cb_pool_set(c, tex, base)) { LOG("[RED] command-buffer descriptor registry allocation failed"); abort(); }
 }
 NVN(nvnTexturePoolInitialize, NVNboolean, NVNtexturePool *tp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)tp = (dpool_t){(const pool_t *)p, off, n}; OLOG("TexturePool n=%d", n);
@@ -469,6 +472,15 @@ NVN(nvnSamplerInitialize, NVNboolean, NVNsampler *s, const NVNsamplerBuilder *b)
 NVN(nvnSamplerFinalize, void, NVNsampler *s) { ((samp_t *)s)->magic = 0; }
 
 // ---------- Programs ----------
+#define NVN_CAPTURE_LOG(...) LOG(__VA_ARGS__)
+#include "nvn_shader_capture.h"
+static nvn_capture_state g_shader_capture = NVN_CAPTURE_INITIALIZER;
+static pthread_once_t g_shader_capture_once = PTHREAD_ONCE_INIT;
+static void shader_capture_init(void) {
+    const char *mode = getenv("DM_NVN_SHDUMP_REGISTER");
+    nvn_capture_init(&g_shader_capture, getenv("DM_NVN_SHDUMP"), mode && !strcmp(mode, "1"));
+}
+static void shader_capture_prepare(void) { pthread_once(&g_shader_capture_once, shader_capture_init); }
 NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
     (void)d; memset(p, 0, sizeof(prog_t)); ((prog_t *)p)->magic = MAGIC('P', 'R', 'O', 'G'); return 1;
 }
@@ -507,10 +519,28 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
 }
+// The draw fallback shares registration's exclusive, serialized writer. It also
+// runs when a deferred key is first resolved, even if that key is already mapped.
+void nvn_shdump_draw(const prog_t *p, unsigned st) {
+    shader_capture_prepare();
+    if (!g_shader_capture.active || st >= p->nstage) return;
+    const NVNshaderData *sd = &p->sd[st];
+    uint32_t nctl = 0, ncode = 0; void *buffer; uint64_t offset;
+    int valid = nvn_capture_lengths(sd->control, &nctl, &ncode);
+    int mapped = valid && sd->data && mtl_addr(sd->data, ncode, &buffer, &offset);
+    uint8_t key[8] = {0};
+    if (mapped) keys_hash(sd, 1, key);
+    nvn_capture_stage(&g_shader_capture, p->serial, st, 1, sd->control,
+                      (const void *)(uintptr_t)sd->data, mapped, mapped ? key : NULL);
+}
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     prog_keys_t *k = pk_get(p, 1);
-    if (!(k->ok >> st & 1)) { keys_hash(&p->sd[st], 0, k->key[st]); k->ok |= (uint8_t)(1u << st); }
+    if (!(k->ok >> st & 1)) {
+        keys_hash(&p->sd[st], 0, k->key[st]); k->ok |= (uint8_t)(1u << st);
+        shader_capture_prepare();
+        if (g_shader_capture.registration) nvn_shdump_draw(p, st);
+    }
     memcpy(key, k->key[st], 8);
     return 1;
 }
@@ -520,12 +550,28 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
     // The keys are computed here (see prog_key in nvn_obj.h): the control section is only guaranteed valid during this call; the code area lives in a memory pool and stays valid while the program is in use
     static int dump = -1; if (dump < 0) dump = getenv("DM_NVN_SHDUMP") != NULL;
+    shader_capture_prepare();
+    if (g_shader_capture.registration) nvn_capture_program(&g_shader_capture, o->serial, p, (unsigned)n);
     prog_keys_t *k = pk_get(p, 1);
     k->ok = 0;
     for (int i = 0; i < n; i++) {
-        if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
-        // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
-        if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
+        uint32_t capture_nctl, capture_ncode;
+        int valid = !g_shader_capture.registration || nvn_capture_lengths(sd[i].control, &capture_nctl, &capture_ncode);
+        int mapped = valid && keys_hash(&sd[i], 1, k->key[i]);
+        if (mapped) k->ok |= (uint8_t)(1u << i);
+        if (g_shader_capture.registration)
+            nvn_capture_stage(&g_shader_capture, o->serial, (unsigned)i, 0, sd[i].control,
+                              (const void *)(uintptr_t)sd[i].data, mapped, mapped ? k->key[i] : NULL);
+        // A caller may free control immediately after SetShaders. Preserve only
+        // its validated hash prefix, zero-padding the legacy debug-copy buffer.
+        if (dump && sd[i].control) {
+            uint32_t nctl, ncode;
+            if (nvn_capture_lengths(sd[i].control, &nctl, &ncode)) {
+                void *c = calloc(1, 0x880);
+                if (c) { memcpy(c, sd[i].control, nctl); o->sd[i].control = c; }
+                else { o->sd[i].control = NULL; LOG("[nvn capture] FAILED: deferred control copy allocation"); }
+            } else o->sd[i].control = NULL;
+        }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
@@ -594,9 +640,10 @@ NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; mtl_finish(); }
 #define OP_RESERVE 24                             // Always keep enough room at the segment end for one JUMP / END
 
 NVN(nvnCommandBufferInitialize, NVNboolean, NVNcommandBuffer *c, NVNdevice *d) {
+    nvn_cb_pool_forget(c);
     memset(c, 0, sizeof(cmd_t)); CB(c)->magic = MAGIC('C', 'M', 'D', 'B'); CB(c)->dev = d; return 1;
 }
-NVN(nvnCommandBufferFinalize, void, NVNcommandBuffer *c) { CB(c)->magic = 0; }
+NVN(nvnCommandBufferFinalize, void, NVNcommandBuffer *c) { nvn_cb_pool_forget(c); CB(c)->magic = 0; }
 NVN(nvnCommandBufferSetMemoryCallback, void, NVNcommandBuffer *c, PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb) { CB(c)->cb = cb; }
 NVN(nvnCommandBufferSetMemoryCallbackData, void, NVNcommandBuffer *c, void *d) { CB(c)->cb_data = d; }
 static uint8_t *align8(uint8_t *p) { return (uint8_t *)(((uintptr_t)p + 7) & ~(uintptr_t)7); }
@@ -676,8 +723,9 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);
     CB(c)->used = 0;   // GetCommandMemoryUsed counts from the start of the memory the game last added, across recordings (see there)
+    CB(c)->command_size = n;
 }
-NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) { (void)c; (void)m; (void)n; }
+NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) { (void)m; CB(c)->control_size = n; }
 // Get space for one record; if not enough, call back into the game per the NVN convention to add command memory
 static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
     size = (size + 7) & ~7u;
@@ -831,9 +879,8 @@ NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStag
 static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
     if (n < 0 || n > 32) { LOG("[RED] bind handle count %d", n); return NULL; }
     p_bind_handles *r = RECN(c, op, p_bind_handles, h, n); r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0; memcpy(r->h, h, 8 * n);
-    if (g_ncbpool) {   // this command buffer may have bound a pool other than the first: move its IDs to that pool's part of the table (handle: texture ID in bits 0-19, sampler ID from bit 20)
-        int tb = 0, sb = 0;
-        for (int i = 0; i < g_ncbpool; i++) if (g_cbpool[i].cmd == (const void *)c) { tb = g_cbpool[i].tb; sb = g_cbpool[i].sb; break; }
+    {   // Move local IDs into this command buffer's descriptor-pool namespace.
+        int tb, sb; nvn_cb_pool_get(c, &tb, &sb);
         for (int i = 0; i < n && (tb || sb); i++) {
             uint64_t v = r->h[i], tid = v & 0xfffff, sid = v >> 20;
             if (op == OP_BIND_SAMP) { if (sid) r->h[i] = (sid + (uint64_t)sb) << 20; }
@@ -1617,6 +1664,7 @@ NVN(nvnTexturePoolSetDebugLabel, void, NVNtexturePool *p, const char *s) { (void
 NVN(nvnSamplerPoolSetDebugLabel, void, NVNsamplerPool *p, const char *s) { (void)p; (void)s; }
 NVN(nvnQueueSetDebugLabel, void, NVNqueue *q, const char *s) { (void)q; (void)s; }
 NVN(nvnProgramSetDebugLabel, void, NVNprogram *p, const char *s) { (void)p; (void)s; }
+NVN(nvnCommandBufferSetDebugLabel, void, NVNcommandBuffer *c, const char *s) { (void)c; (void)s; }
 // Virtual pool (flags 0x200): a GPU address range with no storage; MapVirtual maps pages of physical pools into it. A request is 0x28 bytes: {physical pool, physical offset, virtual offset, size, storage class}.
 // Host approach: if every request can be described by one "base" (same physical pool, same physical offset - virtual offset), the virtual pool's storage points straight at that memory of the physical pool -- the same semantics as one set of physical pages on the real device,
 //   and buffer addresses / Metal buffer lookups land on the block the physical pool already registered. SMBW has a single 128 MB virtual pool, mapped whole by one request onto one physical pool at offset 0.
@@ -1895,6 +1943,8 @@ NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w;
 // signals. Counted per recording, the position stayed at one frame's size (about 18 KB), the ring never freed past it, and after the first 16 MB (about 15 s) the callback waited for ring space forever
 NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c;
     return m->begin ? (size_t)m->used : 0; }
+NVN(nvnCommandBufferGetCommandMemorySize, size_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->command_size; }
+NVN(nvnCommandBufferGetControlMemorySize, size_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->control_size; }
 NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { (void)c; return 0; }
 NVN_NOPROTO(nvnCommandBufferSetCommandMemoryCallbackEnabled, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }
 
@@ -1921,7 +1971,8 @@ NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, i
 NVN_NOPROTO(nvnCommandBufferBindTexturesDeferred, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNtextureHandle *h) {
     p_bind_handles *r = bind_handles(c, OP_BIND_TEX, st, first, n, (const uint64_t *)h);
     if (r && h) { r->defer = 1; r->src = (uint64_t)(uintptr_t)h; }
-    if (g_ncbpool) for (int i = 0; i < g_ncbpool; i++) if (g_cbpool[i].cmd == (const void *)c && (g_cbpool[i].tb || g_cbpool[i].sb)) ONCE_LOG("[RED] deferred-bound handles are read only at replay: the numbering base of this command buffer's bound descriptor pools is not added (pools %d / %d)", g_cbpool[i].tb, g_cbpool[i].sb);
+    int tb, sb; nvn_cb_pool_get(c, &tb, &sb);
+    if (tb || sb) ONCE_LOG("[RED] deferred-bound handles are read only at replay: the numbering base of this command buffer's bound descriptor pools is not added (pools %d / %d)", tb, sb);
 }
 NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNimageHandle h) { uint64_t v = (uint64_t)h; bind_handles(c, OP_BIND_IMG, st, i, 1, &v); }
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { NVNbufferRange r = {a, n}; h_nvnCommandBufferBindVertexBuffers(c, i, 1, &r); }

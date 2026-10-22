@@ -10,6 +10,16 @@ enum {
     DM_BTN_LEFT = 1u << 12, DM_BTN_UP = 1u << 13, DM_BTN_RIGHT = 1u << 14, DM_BTN_DOWN = 1u << 15,
 };
 #define DM_STICK_MAX 32767
+#define DM_INPUT_MAX_PLAYERS 8
+// Profile-selected logical capacity; physical connection order never renumbers
+// occupied slots. Publishing requires the epoch returned by connect.
+unsigned dm_input_max_players(void);
+uint64_t dm_pad_connect_player(unsigned player, int connected);
+int dm_pad_set_player(unsigned player, uint64_t epoch, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
+void dm_pad_release_players(void);
+// Indicator hints use the same logical assignment as SDK input and rumble.
+unsigned dm_pad_logical_player(unsigned physical_player);
+void dm_pad_set_assignment_callback(void (*callback)(void));
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
 uint64_t dm_input_samples(void);   // Cumulative number of times the game has sampled the controller
 // Physical / virtual controller (iOS GameController, dm_gamepad.m): stored separately from touch input; when the game reads the controller, buttons are

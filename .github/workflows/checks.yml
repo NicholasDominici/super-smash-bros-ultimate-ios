@@ -13,4 +13,10 @@ jobs:
         with:
           python-version: '3.12'
       - name: Game-free source and publication checks
-        run: python3 tools/check.py
+        run: |
+          python3 -m pip install -r requirements.txt
+          python3 tools/check.py
+      - name: Bounded ARC and effect parser tests
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/smash-arc-target
+        run: cargo test --locked --manifest-path tools/smash_arc/Cargo.toml

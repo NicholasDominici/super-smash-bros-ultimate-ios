@@ -1,4 +1,5 @@
-// Virtual gamepad (Nintendo button positions) + physical controllers (GameController). Both are merged and handed to the host through dm_input_set (hle_hid.c, bit layout in dm_input.h).
+// Virtual Nintendo-position P1 controls and independently assigned physical players.
+// The host merges touch only into P1; physical callbacks carry their slot epoch.
 //   Two layouts; one tap on the layout button at the top centre (labelled with the current layout, "2D" / "3D") switches them, and the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_FULL).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
@@ -24,17 +25,27 @@ enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS
 enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_touch_btn, g_pad_btn;
-static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry, g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry;
-static GCController *g_selected_pad;
-static _Atomic uint64_t g_pad_epoch;
-static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
+static uint64_t g_touch_btn;
+static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry;
+static GCController *g_pads[DM_INPUT_MAX_PLAYERS];
+static uint64_t g_pad_btn[DM_INPUT_MAX_PLAYERS], g_pad_epoch[DM_INPUT_MAX_PLAYERS];
+static BOOL g_pad_active;
+// HID may swap players on a guest thread. Only the main queue touches the
+// framework indicator hints; delayed work looks up current identities again.
+static void update_pad_indicators(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_pad_active) return;
+        for (unsigned p = 0; p < dm_input_max_players(); ++p) {
+            GCController *controller = g_pads[p];
+            if (!controller) continue;
+            unsigned logical = dm_pad_logical_player(p);
+            controller.playerIndex = logical < 4 ? (GCControllerPlayerIndex)logical : GCControllerPlayerIndexUnset;
+        }
+    });
+}
 static void publish(void) {
     pthread_mutex_lock(&g_mu);
-    int32_t lx = g_touch_lx, ly = g_touch_ly, rx = g_touch_rx, ry = g_touch_ry;
-    if (tilted(g_pad_lx, g_pad_ly)) { lx = g_pad_lx; ly = g_pad_ly; }   // a tilted physical stick wins
-    if (tilted(g_pad_rx, g_pad_ry)) { rx = g_pad_rx; ry = g_pad_ry; }
-    dm_input_set(g_touch_btn | g_pad_btn, lx, ly, rx, ry);
+    dm_input_set(g_touch_btn, g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -123,6 +134,10 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserver:self selector:@selector(padsChanged) name:GCControllerDidConnectNotification object:nil];
         [nc addObserver:self selector:@selector(padsChanged) name:GCControllerDidDisconnectNotification object:nil];
+        [nc addObserver:self selector:@selector(suspendPads) name:UIApplicationWillResignActiveNotification object:nil];
+        [nc addObserver:self selector:@selector(resumePads) name:UIApplicationDidBecomeActiveNotification object:nil];
+        g_pad_active = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
+        dm_pad_set_assignment_callback(update_pad_indicators);
         [self padsChanged];
     }
     return self;
@@ -368,12 +383,18 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 
 // ---- Physical controllers ----
 static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
-static void read_pad(GCExtendedGamepad *g) {
+// Both checks are needed: a framework callback may already be executing when
+// its handler is removed. The host also validates the physical slot epoch.
+static void read_pad(unsigned player, GCController *controller, uint64_t epoch, GCExtendedGamepad *g) {
+    pthread_mutex_lock(&g_mu);
+    BOOL valid = g_pad_active && g_pads[player] == controller && g_pad_epoch[player] == epoch;
+    uint64_t prior = g_pad_btn[player];
+    pthread_mutex_unlock(&g_mu);
+    if (!valid) return;
     uint64_t m = 0;
     #define K(btn, bit) if (btn.isPressed) m |= 1ull << bit
-    K(g.buttonB, B_A); K(g.buttonA, B_B); K(g.buttonY, B_X); K(g.buttonX, B_Y);   // by position: right A, bottom B, top X, left Y
+    K(g.buttonB, B_A); K(g.buttonA, B_B); K(g.buttonY, B_X); K(g.buttonX, B_Y);
     K(g.leftShoulder, B_L); K(g.rightShoulder, B_R);
-    pthread_mutex_lock(&g_mu); uint64_t prior = g_pad_btn; pthread_mutex_unlock(&g_mu);
     if (g.leftTrigger.value > ((prior & DM_BTN_ZL) ? 0.08f : 0.14f)) m |= DM_BTN_ZL;
     if (g.rightTrigger.value > ((prior & DM_BTN_ZR) ? 0.08f : 0.14f)) m |= DM_BTN_ZR;
     K(g.buttonMenu, B_PLUS); if (g.buttonOptions) K(g.buttonOptions, B_MINUS);
@@ -381,37 +402,85 @@ static void read_pad(GCExtendedGamepad *g) {
     K(g.dpad.left, B_LEFT); K(g.dpad.up, B_UP); K(g.dpad.right, B_RIGHT); K(g.dpad.down, B_DOWN);
     #undef K
     pthread_mutex_lock(&g_mu);
-    g_pad_btn = m; g_pad_lx = axis(g.leftThumbstick.xAxis.value); g_pad_ly = axis(g.leftThumbstick.yAxis.value);
-    g_pad_rx = axis(g.rightThumbstick.xAxis.value); g_pad_ry = axis(g.rightThumbstick.yAxis.value);
+    valid = g_pad_active && g_pads[player] == controller && g_pad_epoch[player] == epoch;
+    if (valid) {
+        g_pad_btn[player] = m;
+        dm_pad_set_player(player, epoch, m, axis(g.leftThumbstick.xAxis.value), axis(g.leftThumbstick.yAxis.value),
+                          axis(g.rightThumbstick.xAxis.value), axis(g.rightThumbstick.yAxis.value));
+    }
     pthread_mutex_unlock(&g_mu);
-    dm_controller_feedback_travel(g.leftTrigger.value, g.rightTrigger.value);
-    publish();
+    if (valid) dm_controller_feedback_travel_player(player, controller, g.leftTrigger.value, g.rightTrigger.value);
 }
 - (void)padsChanged {
     if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self padsChanged]; }); return; }
     NSArray<GCController *> *controllers = GCController.controllers;
-    GCController *chosen = g_selected_pad && [controllers containsObject:g_selected_pad] ? g_selected_pad : nil;
-    for (GCController *c in controllers) if (c.extendedGamepad) {
-        if (!chosen) chosen = c;
-        if ([c.extendedGamepad isKindOfClass:GCDualSenseGamepad.class]) { chosen = c; break; }
+    unsigned limit = dm_input_max_players();
+    // Preserve legacy single-player DualSense preference. Multiplayer keeps each
+    // occupied identity; enumeration order and controller type cannot steal it.
+    GCController *legacyChoice = nil;
+    if (limit == 1) {
+        if ([controllers containsObject:g_pads[0]]) legacyChoice = g_pads[0];
+        for (GCController *c in controllers) if (c.extendedGamepad) {
+            if (!legacyChoice) legacyChoice = c;
+            if ([c.extendedGamepad isKindOfClass:GCDualSenseGamepad.class]) { legacyChoice = c; break; }
+        }
     }
-    if (chosen != g_selected_pad) {
-        uint64_t epoch = atomic_fetch_add(&g_pad_epoch, 1) + 1;
-        g_selected_pad.extendedGamepad.valueChangedHandler = nil;
-        g_selected_pad = chosen;
-        pthread_mutex_lock(&g_mu); g_pad_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = 0; pthread_mutex_unlock(&g_mu);
-        dm_controller_feedback_attach(chosen);
-        chosen.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) {
-            (void)el; if (atomic_load(&g_pad_epoch) == epoch) read_pad(g);
+    for (unsigned player = 0; player < limit; ++player) {
+        GCController *controller = g_pads[player];
+        if (controller && (![controllers containsObject:controller] || !controller.extendedGamepad || (limit == 1 && controller != legacyChoice))) {
+            controller.extendedGamepad.valueChangedHandler = nil;
+            pthread_mutex_lock(&g_mu);
+            g_pads[player] = nil; g_pad_btn[player] = g_pad_epoch[player] = 0;
+            pthread_mutex_unlock(&g_mu);
+            dm_pad_connect_player(player, 0); dm_controller_feedback_attach_player(player, nil);
+            controller.playerIndex = GCControllerPlayerIndexUnset;
+        }
+    }
+    for (GCController *controller in controllers) {
+        if (!controller.extendedGamepad || (limit == 1 && controller != legacyChoice)) continue;
+        unsigned found = limit;
+        for (unsigned player = 0; player < limit; ++player) if (g_pads[player] == controller) found = player;
+        if (found == limit) {
+            for (unsigned player = 0; player < limit; ++player) if (!g_pads[player]) { found = player; break; }
+            if (found == limit) continue;
+            pthread_mutex_lock(&g_mu); g_pads[found] = controller; pthread_mutex_unlock(&g_mu);
+        }
+        if (!g_pad_active || g_pad_epoch[found]) continue;
+        uint64_t epoch = dm_pad_connect_player(found, 1);
+        pthread_mutex_lock(&g_mu); g_pad_epoch[found] = epoch; pthread_mutex_unlock(&g_mu);
+        dm_controller_feedback_attach_player(found, controller);
+        unsigned player = found;
+        __weak GCController *weakController = controller;
+        controller.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) {
+            (void)el; GCController *controller = weakController;
+            if (controller) read_pad(player, controller, epoch, g);
         };
+        read_pad(player, controller, epoch, controller.extendedGamepad);
     }
-    if (chosen) read_pad(chosen.extendedGamepad); else publish();
-    self->_padOff = chosen != nil; self->_controls.hidden = chosen != nil; [self reset];
+    // A vacant physical P1 slot can still use the on-screen P1 controls while
+    // another physical player remains connected.
+    update_pad_indicators();
+    self->_padOff = g_pads[0] != nil; self->_controls.hidden = self->_padOff; [self reset];
+}
+- (void)suspendPads {
+    if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self suspendPads]; }); return; }
+    pthread_mutex_lock(&g_mu); g_pad_active = NO; pthread_mutex_unlock(&g_mu);
+    for (unsigned player = 0; player < dm_input_max_players(); ++player) {
+        g_pads[player].extendedGamepad.valueChangedHandler = nil;
+        pthread_mutex_lock(&g_mu); g_pad_btn[player] = g_pad_epoch[player] = 0; pthread_mutex_unlock(&g_mu);
+        dm_pad_connect_player(player, 0);
+    }
+    dm_pad_release_players(); dm_controller_feedback_focus(0); [self reset];
+}
+- (void)resumePads {
+    if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self resumePads]; }); return; }
+    pthread_mutex_lock(&g_mu); g_pad_active = YES; pthread_mutex_unlock(&g_mu);
+    dm_controller_feedback_focus(1); [self padsChanged];
 }
 @end
 
 UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v; return v; }
-void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
-    dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
-    pthread_mutex_lock(&g_mu); g_pad_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = 0; pthread_mutex_unlock(&g_mu); publish();
+void dm_gamepad_reset(void) {
+    if (NSThread.isMainThread) [g_view suspendPads];
+    else dispatch_async(dispatch_get_main_queue(), ^{ [g_view suspendPads]; });
 }

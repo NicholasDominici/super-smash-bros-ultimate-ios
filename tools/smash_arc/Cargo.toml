@@ -1,0 +1,14 @@
+# Targeted, private-input ARC inspection; generated game material stays outside Git.
+[package]
+name = "smash-arc-tool"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+smash-arc = { git = "https://github.com/jam1garner/smash-arc", rev = "944ac568689fe9c9ddeea93a776db42dc7d41790", default-features = false, features = ["dir-listing", "libzstd"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "=0.10.9"
+zstd = "=0.5.4"

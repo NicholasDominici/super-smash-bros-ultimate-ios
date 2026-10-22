@@ -19,6 +19,11 @@
 #   · SPKG (the older KTGL of Fire Emblem: Three Houses): shader packages of G2S containers, loose and inside the LINKDATA archive DATA0.bin / DATA1.bin, see kt_shaders and linkdata_jobs
 #   · SDF (Capcom's RE Engine, Monster Hunter Rise): shader definitions inside the PAK archives (KPKA, entries zstd / deflate compressed), only the newest copy of each path, see kpka_jobs and sdf_shaders
 #   · Trinity packs (Game Freak, Pokémon Legends: Z-A): BNSH inside the files of arc/data.trpfs (Oodle Mermaid, decoded by the game's own decoder in the Mac host), see trpfs_jobs and trinity_shaders
+#   · Smash Ultimate: targeted .nushdb/.nufxlb sources extracted from data.arc by tools/smash_arc; pass --smash-shaders <private directory> (or DM_SMASH_SHADERS).
+#       SSBH/GLSLC bytes are validated by smash_shaders.py; original control/code bytes and exact Nufx named vertex/pixel relationships are retained. data.arc itself is never read wholesale.
+#       Particle effect shaders live in EFFN/EFT2 .eff resources: use effect-shaders and --smash-effect-shaders <private directory>.
+#       UI shaders also live in SARC members: run smash-arc-tool shader-archives and pass --smash-ui-shaders <private directory>. Only verified shader-bearing members are loaded.
+#       --nvn-shader-capture <private directory> supplements static sources with exact observed original .ctl/.code pairs from a separately version-gated Mac capture; filenames must match the complete byte hashes.
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -30,9 +35,9 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys
+import argparse, collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import uepak
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import uepak, smash_shaders
 GAME = _game.load()   # the current game profile (DM_GAME, required): source group rules and the table header note
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
 # The sources are what the game files hold, with no profile switch: GLSLC outputs in main (glslc_shaders), the outputs the game compiles at run time when a capture is there (DM_GLSLC_CAPTURE,
@@ -54,13 +59,36 @@ def ctl_len(ctl):
 def skey(ctl, code):
     return hashlib.sha256(ctl[:ctl_len(ctl)] + code).hexdigest()[:16]
 
-def same_shader(a, b):
-    """Two copies of one key hold the same shader: the code areas are equal, and so are the control sections up to their own length (control +0x20). Pokémon Legends: Z-A's UI layout archives
-    (__ArchiveShader.bnsh inside the .truiv packs) give 104 KB control sections whose stage descriptor length runs 456 bytes past their own length, and those trailing bytes differ between copies"""
+def same_shader(a, b, allow_key_prefix=False):
+    """Compare complete code and declared control bytes, excluding container tails.
+
+    An explicitly validated NVN capture retains only the intrinsic key prefix
+    (at most 0x880 bytes), even when a static GLSLC section declares more. In
+    that specific merge, compare the full available prefix; keep the static
+    complete control record for translation. Two full static records still
+    compare every declared control byte, including those beyond the hash span.
+    """
     (ca, ka), (cb, kb) = a, b
     n = struct.unpack_from('<I', ca, 0x20)[0] if len(ca) >= 0x24 else len(ca)
-    n = n if 0x760 <= n <= min(len(ca), len(cb)) else max(len(ca), len(cb))
+    other = struct.unpack_from('<I', cb, 0x20)[0] if len(cb) >= 0x24 else len(cb)
+    short, long = min(len(ca), len(cb)), max(len(ca), len(cb))
+    if allow_key_prefix and n == other and 0x760 <= n <= 64 << 20 and not n % 4 and short == ctl_len(ca) and long >= n:
+        n = short
+    else:
+        n = n if 0x760 <= n <= short else long
     return ka == kb and ca[:n] == cb[:n]
+
+def merge_shader_record(key, existing, incoming):
+    """Validate duplicate originals and retain the fuller static control record."""
+    capture = '#NVN_CAPTURE#' in (existing[0] + incoming[0])
+    if existing[1] != incoming[1] or not same_shader(existing[2:4], incoming[2:4], allow_key_prefix=capture):
+        red(f'key {key} is the same but the control section or code area differs ({incoming[0]} / {existing[0]})')
+    if capture:
+        if len(incoming[2]) > len(existing[2]):
+            return incoming
+        if len(incoming[2]) == len(existing[2]) and '#NVN_CAPTURE#' in existing[0] and '#NVN_CAPTURE#' not in incoming[0]:
+            return incoming
+    return existing
 
 def check(where, st, ctl, code):
     """control section and code area consistent; returns the reason if not"""
@@ -406,7 +434,12 @@ def sarc_members(d):
     names = hl + 12 + 16 * n + 8
     for i in range(n):
         h, attr, s, e = struct.unpack_from('<IIII', d, hl + 12 + 16 * i)
-        nm = d[names + (attr & 0xffffff) * 4:].split(b'\0')[0].decode('utf-8', 'replace') if attr >> 24 else f'#{i}'
+        if attr >> 24:
+            start = names + (attr & 0xffffff) * 4
+            end = d.find(b'\0', start, doff)
+            if not names <= start < doff or end < 0: raise ValueError('SARC member name escapes its name table')
+            nm = d[start:end].decode('utf-8', 'replace')
+        else: nm = f'#{i}'
         yield nm, d[doff + s:doff + e]
 
 NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN stage order
@@ -520,7 +553,7 @@ def ps_inputs(code):
     """Generic attributes a pixel shader reads: SPH words 6–13 are the input map, 8 bits for each of the 32 attributes (Ryujinx ShaderHeader.ImapTypes), non-zero = read; the translated MSL inputs are exactly user(locn<attribute>)"""
     return {i for i in range(32) if struct.unpack_from('<I', code, 0x30 + 4 * (6 + (i >> 2)))[0] >> ((i & 3) * 8) & 0xff}
 
-SINGLE_STAGE = ('#GLSLC@', '#UE')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records (BNSH variations, Unity programs, MSHD and SDF pair theirs)
+SINGLE_STAGE = ('#GLSLC@', '#UE', '#NVN_CAPTURE#')   # independent stage programs use a minimal varying-location cover; no invented source-program pairing
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
     from the pipeline state) have their real pairs only at draw time. vs_pad uses only the union of the locations the paired pixel shaders read, so every single-stage vertex shader is paired with
@@ -567,6 +600,10 @@ def scan_file(args):
     path, rel = args[:2]
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
+    if head[:8] == smash_shaders.ARC_MAGIC:
+        # Smash's archive is many gigabytes. Only the separately extracted SSBH
+        # bundle is scanned; require it below so omission cannot pass silently.
+        return rel, {}, set(), 'smash-arc'
     if head[:8] == IDRK:
         idrk_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -611,8 +648,20 @@ def nso_image(path):
     return bytes(img)
 
 def main():
-    romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
-    pairsout = sys.argv[6] if len(sys.argv) > 6 else None
+    parser = argparse.ArgumentParser(description='Split validated native shader control/code records into translator packages.')
+    parser.add_argument('romfs')
+    parser.add_argument('main')
+    parser.add_argument('package')
+    parser.add_argument('shader_map')
+    parser.add_argument('shader_facts')
+    parser.add_argument('shader_pairs', nargs='?')
+    parser.add_argument('--smash-shaders', default=os.environ.get('DM_SMASH_SHADERS'), help='private targeted ARC extraction containing .nushdb and .nufxlb')
+    parser.add_argument('--smash-ui-shaders', default=os.environ.get('DM_SMASH_UI_SHADERS'), help='private shader-archives extraction containing BNSH members and provenance manifest')
+    parser.add_argument('--smash-effect-shaders', default=os.environ.get('DM_SMASH_EFFECT_SHADERS'), help='private effect-shaders extraction containing validated EFFN/EFT2 GRSN/GRSC shader carriers')
+    parser.add_argument('--nvn-shader-capture', help='optional exact .ctl/.code pairs from a version-gated local Mac capture')
+    args = parser.parse_args()
+    romfs_l, main_l, pkg, mapout, factsout = args.romfs, args.main, args.package, args.shader_map, args.shader_facts
+    pairsout = args.shader_pairs
     # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
@@ -641,6 +690,38 @@ def main():
         if not names and uepak.unreal_paks(romfs): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
         results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
+    if args.smash_shaders:
+        try:
+            bundle = smash_shaders.load_directory(args.smash_shaders)
+        except (OSError, smash_shaders.ShaderFormatError) as error:
+            red(f'Smash shader bundle: {error}')
+        found = [(s.source, s.stage, s.control, s.code) for s in bundle.shaders.values()]
+        pairs = {(skey(bundle.shaders[v].control, bundle.shaders[v].code),
+                  skey(bundle.shaders[p].control, bundle.shaders[p].code)) for v, p in bundle.pairs}
+        results.append(('smash', uniq_keys(found), pairs, {}))
+        print(f'Smash SSBH: {bundle.nushdb_files} shader containers, {bundle.nufxlb_files} effect libraries, '
+              f'{len(bundle.shaders)} named shaders, {bundle.programs} programs, {len(bundle.pairs)} exact named vertex/pixel pairs', flush=True)
+    if args.smash_ui_shaders:
+        try:
+            ui_sources = smash_shaders.ui_shader_sources(args.smash_ui_shaders)
+        except (OSError, ValueError, smash_shaders.ShaderFormatError) as error:
+            red(f'Smash UI shader bundle: {error}')
+        files += ui_sources
+        print(f'Smash UI: {len(ui_sources)} verified shader-bearing SARC members', flush=True)
+    if args.smash_effect_shaders:
+        try:
+            effect_sources = smash_shaders.effect_shader_sources(args.smash_effect_shaders)
+        except (OSError, ValueError, smash_shaders.ShaderFormatError) as error:
+            red(f'Smash effect shader bundle: {error}')
+        files += effect_sources
+        print(f'Smash effects: {len(effect_sources)} verified EFFN/EFT2 shader carriers', flush=True)
+    captured = []
+    if args.nvn_shader_capture:
+        try:
+            captured = smash_shaders.load_nvn_capture_directory(args.nvn_shader_capture)
+        except (OSError, ValueError, smash_shaders.ShaderFormatError) as error:
+            red(f'NVN shader capture: {error}')
+        print(f'NVN capture: {len(captured)} exact observed original stage records (duplicates merge by control+code)', flush=True)
     zdicts = {k: v for r in romfs_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
@@ -652,22 +733,31 @@ def main():
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         results += list(ex.map(scan_file, big)) + list(ex.map(scan_file, files, chunksize=16))
-    trees, defer = {}, []
+    trees, defer, smash_arc = {}, [], False
     for rel, uniq, pr, extra in results:
-        if extra == 'defer': defer.append(rel)
+        if extra == 'smash-arc': smash_arc = True
+        elif extra == 'defer': defer.append(rel)
         elif extra: trees.update(extra)
+    if smash_arc and not (args.smash_shaders and args.smash_ui_shaders and args.smash_effect_shaders):
+        red('data.arc requires targeted SSBH, UI and effect shaders: use tools/smash_arc extract, shader-archives and effect-shaders, then --smash-shaders <directory> --smash-ui-shaders <directory> --smash-effect-shaders <directory>')
     if defer:
         byrel = {r: p for p, r in files}
         with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
         results = [r for r in results if r[3] != 'defer'] + again
+    if captured:
+        results.append(('nvn_capture', uniq_keys([(s.source, s.stage, s.control, s.code) for s in captured]), set(), {}))
     per_src = collections.Counter(); pairs = set()
     for rel, uniq, pr, _ in results:
         pairs |= pr
         for key, v in uniq.items():
             if key in keys:
-                if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
+                old = keys[key]
+                keys[key] = merge_shader_record(key, old, v)
+                if keys[key] is not old:
+                    per_src[group(old[0])] -= 1
+                    per_src[group(keys[key][0])] += 1
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
     sp, cover = separable_pairs(keys); pairs |= sp
@@ -692,7 +782,8 @@ def main():
     with open(mapout, 'w') as f:
         kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] for r in rows)),
                                             ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
-                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
+                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows)),
+                                            ('Smash SSBH', any('#NUSHDB#' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; this game has no PC version to pair with\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
@@ -707,7 +798,7 @@ def main():
         for k in sorted(facts): f.write(k + '\t' + json.dumps(facts[k], sort_keys=True, separators=(',', ':')) + '\n')
     if pairsout:
         with open(pairsout, 'w') as f:
-            f.write('# kind: evidence  vertex / pixel shader pairs within BNSH variations (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
+            f.write('# kind: evidence  vertex / pixel shader pairs within source programs, including exact Nufx named relationships (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
             for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
     print(f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common()) + f'; compute shader answers {len(facts)} rows' + (f'; variation pairs {len(pairs)}' if pairsout else ''))
 

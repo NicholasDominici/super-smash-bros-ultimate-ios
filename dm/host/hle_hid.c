@@ -1,6 +1,7 @@
 // nn::hid (controller): on the real device shared memory is read through the hid service; the host takes the current state written by the front end (Mac keyboard / controller, iOS virtual gamepad / controller).
-// Generic, game-independent version: one standard controller. DM_OPMODE=0 (handheld) → handheld controller (Npad id 0x20); otherwise → 1P full-key controller (id 0).
-// Physical vibration and six-axis use dm_feedback; mouse/keyboard remain disconnected. The controller applet reports one player.
+// Profile-selected local controllers. Legacy profiles retain one handheld/full-key
+// controller; multiplayer profiles expose stable independent full-key Npad slots.
+// Physical vibration and six-axis share each slot's assignment and lifecycle.
 #include "hle.h"
 #include "dm_input.h"
 #include "dm_feedback.h"
@@ -21,6 +22,16 @@ enum { STICK_THRESH = 0x4000 };
 typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attributes, _pad; } NpadState;
 _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 
+// Smash 13.0.5 sdk 5fd4f531c1195e9e5510c9e73f22cd39: its detail
+// GetNpadStates(Gc) at +0x23a6d8..+0x23a760 writes 0x30-byte records,
+// attributes +0x20 and analog trigger values +0x24/+0x28. We advertise
+// full-key controllers, never GameCube style; GC polling remains disconnected.
+typedef struct {
+    int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry;
+    uint32_t attributes, left_trigger, right_trigger, reserved;
+} NpadGcState;
+_Static_assert(sizeof(NpadGcState) == 0x30, "NpadGcState ABI");
+
 // Front-end publishing: the keyboard / touch path (dm_input_set) and the physical controller path (dm_pad_set) are ORed; press edges are latched until the game's next read so short presses are not lost
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_pad_btn, g_pad_axes, g_pad_latch;
 static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history entries below the newest keep positive sampling numbers
@@ -32,6 +43,62 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t 
 }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
+}
+// A slot is a physical identity during its connection, not its position in the
+// framework enumeration. Epochs reject callbacks queued before removal/reuse.
+#ifndef DM_GAME_LOCAL_PLAYERS
+#define DM_GAME_LOCAL_PLAYERS 1
+#endif
+_Static_assert(DM_GAME_LOCAL_PLAYERS >= 1 && DM_GAME_LOCAL_PLAYERS <= DM_INPUT_MAX_PLAYERS, "local player limit");
+typedef struct { uint64_t epoch, buttons, axes, latch; int connected; } pad_slot;
+static pad_slot g_players[DM_INPUT_MAX_PLAYERS];
+static unsigned g_assignment[DM_INPUT_MAX_PLAYERS] = {0,1,2,3,4,5,6,7};
+static void (*g_assignment_callback)(void);
+static pthread_mutex_t g_input_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint32_t g_supported_ids = 0x1ffu, g_styles_supported = 0xffffffffu;
+// One event registration per guest Npad; rebinding replaces the pointer.
+static void *g_style_events[DM_INPUT_MAX_PLAYERS + 1];
+static void signal_style_events(void) {
+    void *events[DM_INPUT_MAX_PLAYERS + 1];
+    pthread_mutex_lock(&g_input_mu); memcpy(events, g_style_events, sizeof events); pthread_mutex_unlock(&g_input_mu);
+    for (unsigned i = 0; i < DM_INPUT_MAX_PLAYERS + 1; ++i) if (events[i]) hle_signal_system_event(events[i]);
+}
+unsigned dm_input_max_players(void) { return DM_GAME_LOCAL_PLAYERS; }
+unsigned dm_pad_logical_player(unsigned physical_player) {
+    pthread_mutex_lock(&g_input_mu);
+    unsigned logical = dm_input_max_players();
+    for (unsigned p = 0; p < dm_input_max_players(); ++p) if (g_assignment[p] == physical_player) { logical = p; break; }
+    pthread_mutex_unlock(&g_input_mu); return logical;
+}
+void dm_pad_set_assignment_callback(void (*callback)(void)) {
+    pthread_mutex_lock(&g_input_mu); g_assignment_callback = callback; pthread_mutex_unlock(&g_input_mu);
+}
+uint64_t dm_pad_connect_player(unsigned player, int connected) {
+    if (player >= dm_input_max_players()) return 0;
+    pthread_mutex_lock(&g_input_mu);
+    pad_slot *slot = &g_players[player];
+    if (slot->connected != !!connected) {
+        slot->connected = !!connected; ++slot->epoch;
+        slot->buttons = slot->axes = slot->latch = 0;
+    }
+    uint64_t epoch = slot->epoch; pthread_mutex_unlock(&g_input_mu);
+    signal_style_events(); return epoch;
+}
+int dm_pad_set_player(unsigned player, uint64_t epoch, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    if (player >= dm_input_max_players() || !epoch) return 0;
+    pthread_mutex_lock(&g_input_mu);
+    pad_slot *slot = &g_players[player];
+    int accept = slot->connected && slot->epoch == epoch;
+    if (accept) { slot->latch |= buttons & ~slot->buttons; slot->buttons = buttons; slot->axes = pack(lx, ly, rx, ry); }
+    pthread_mutex_unlock(&g_input_mu); return accept;
+}
+void dm_pad_release_players(void) {
+    // Focus loss cancels unpublished short presses as well as held controls.
+    atomic_store(&g_btn, 0); atomic_store(&g_axes, 0); atomic_store(&g_latch, 0);
+    atomic_store(&g_pad_btn, 0); atomic_store(&g_pad_axes, 0); atomic_store(&g_pad_latch, 0);
+    pthread_mutex_lock(&g_input_mu);
+    for (unsigned i = 0; i < DM_INPUT_MAX_PLAYERS; ++i) g_players[i].buttons = g_players[i].axes = g_players[i].latch = 0;
+    pthread_mutex_unlock(&g_input_mu);
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR (plus the sticks LLeft LUp LRight LDown and RLeft RUp RRight RDown) Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown,
@@ -59,7 +126,7 @@ void hid_keys_init(void) {
     char buf[4096]; snprintf(buf, sizeof buf, "%s", e);
     for (char *tok = strtok(buf, ","); tok && g_nsteps < KEY_STEPS; tok = strtok(NULL, ",")) {
         char *c = strchr(tok, ':'); if (!c) { LOG("[RED] DM_KEYS step lacks 'seconds:': %s", tok); continue; }
-        *c = 0; int fr = (tok[0] == 'f' || tok[0] == 'F'); key_step st = {atof(tok + fr), 0.15, 0}; st.frame = fr;
+        *c = 0; int fr = (tok[0] == 'f' || tok[0] == 'F'); key_step st = {.at = atof(tok + fr), .hold = 0.15}; st.frame = fr;
         int rep = 1; double every = 0;
         char *r = strchr(c + 1, '*'); if (r) { *r = 0; rep = atoi(r + 1); char *sl = strchr(r + 1, '/'); every = sl ? atof(sl + 1) : 1; if (rep < 1) rep = 1; }
         char *h = strchr(c + 1, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
@@ -86,18 +153,40 @@ void hid_keys_init(void) {
     pthread_t th; if (g_nsteps && !pthread_create(&th, NULL, keys_main, NULL)) { pthread_detach(th); LOG("DM_KEYS: %d steps", g_nsteps); }
 }
 
-static uint32_t connected_id(void) { return dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1; }
+static uint32_t connected_id(void) { return dm_input_max_players() == 1 && dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1; }
 uint32_t hle_hid_connected_npad(void) { return connected_id(); }   // nfp's NFC device sits on this controller (hle_sdk16.c)
-static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
+// Caller owns g_input_mu so connectivity and assignment are one snapshot.
+static uint32_t style_locked(uint32_t id) {
+    if (dm_input_max_players() == 1) return id != connected_id() ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY;
+    if (id >= dm_input_max_players() || !(atomic_load(&g_supported_ids) & (1u << id)) || !(atomic_load(&g_styles_supported) & STYLE_FULLKEY)) return 0;
+    unsigned slot = g_assignment[id];
+    // The on-screen pad supplies P1 when its physical slot is vacant.
+    return slot == 0 || g_players[slot].connected ? STYLE_FULLKEY : 0;
+}
+static uint32_t style_of(uint32_t id) {
+    pthread_mutex_lock(&g_input_mu); uint32_t style = style_locked(id); pthread_mutex_unlock(&g_input_mu); return style;
+}
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
 static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of the two paths is deflected more
 
 static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
-    if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
-    uint64_t b = atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_pad_btn) | atomic_exchange(&g_pad_latch, 0);
-    uint64_t k = atomic_load(&g_axes), p = atomic_load(&g_pad_axes);
+    pthread_mutex_lock(&g_input_mu);
+    if (!(style_locked(id) & style)) { pthread_mutex_unlock(&g_input_mu); return; }
+    unsigned slot = id == NPAD_HANDHELD ? 0 : g_assignment[id];
+    uint64_t b = g_players[slot].buttons | g_players[slot].latch, p = g_players[slot].axes;
+    g_players[slot].latch = 0;
+    pthread_mutex_unlock(&g_input_mu);
+    uint64_t k = 0;
+    if (slot == 0) {
+        b |= atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_pad_btn) | atomic_exchange(&g_pad_latch, 0);
+        k = atomic_load(&g_axes);
+        uint64_t legacy = atomic_load(&g_pad_axes);
+        // Keep the existing scripted P1 path independent of physical callbacks.
+        p = pack(pick(ax(p, 0), ax(legacy, 0)), pick(ax(p, 1), ax(legacy, 1)),
+                 pick(ax(p, 2), ax(legacy, 2)), pick(ax(p, 3), ax(legacy, 3)));
+    }
     s->lx = pick(ax(k, 0), ax(p, 0)); s->ly = pick(ax(k, 1), ax(p, 1)); s->rx = pick(ax(k, 2), ax(p, 2)); s->ry = pick(ax(k, 3), ax(p, 3));
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
@@ -123,10 +212,15 @@ static int states(NpadState *out, int n, uint32_t id, uint32_t style) {
 }
 
 HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "connect to the hid service; the host takes input from the front-end state", void, h_hid_InitNpad, void) {}
-HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "supported controller ids; fixed by the host", void, h_hid_SetIds, const uint32_t *ids, uint64_t n) { (void)ids; (void)n; }
-static uint32_t g_styles_supported = 0xffffffffu;
+HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "record supported controller ids", void, h_hid_SetIds, const uint32_t *ids, uint64_t n) {
+    if (dm_input_max_players() == 1) return;
+    if (n > DM_INPUT_MAX_PLAYERS + 2 || (n && !ids)) return;
+    uint32_t mask = 0;
+    for (uint64_t i = 0; i < n; ++i) if (ids[i] < DM_INPUT_MAX_PLAYERS) mask |= 1u << ids[i];
+    atomic_store(&g_supported_ids, mask); signal_style_events();
+}
 HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "supported controller styles; the host records them and picks the reported style from them", void, h_hid_SetStyles, uint32_t styles) {
-    if (styles != g_styles_supported) LOG("hid supported controller styles %#x", styles); g_styles_supported = styles; }
+    if (styles != atomic_load(&g_styles_supported)) LOG("hid supported controller styles %#x", styles); atomic_store(&g_styles_supported, styles); signal_style_events(); }
 HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "controller style query; follows DM_OPMODE", uint32_t, h_hid_GetStyle, const uint32_t *id) { return style_of(*id); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", "full-key controller states", int, h_hid_StatesFullKey, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_FULLKEY); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", "handheld controller states", int, h_hid_StatesHandheld, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_HANDHELD); }
@@ -138,17 +232,32 @@ static uint32_t g_hold_type;
 HLE_FORCE("_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", "Joy-Con hold orientation; the host only records it", void, h_hid_HoldType, int t) { g_hold_type = (uint32_t)t; }
 HLE_FORCE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", "Joy-Con assignment: dual", int, h_hid_GetJoyAssign, const uint32_t *id) { (void)id; return 0; }
 HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", "Joy-Con single assignment; ignored by the host", void, h_hid_JoySingle, const uint32_t *id) { (void)id; }
-HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap controller ids; ignored by the host", void, h_hid_Swap, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; }
+HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap logical Npad assignments including feedback", void, h_hid_Swap, const uint32_t *a, const uint32_t *b) {
+    if (!a || !b || *a >= dm_input_max_players() || *b >= dm_input_max_players() || *a == *b) return;
+    pthread_mutex_lock(&g_input_mu);
+    unsigned slot = g_assignment[*a]; g_assignment[*a] = g_assignment[*b]; g_assignment[*b] = slot;
+    void (*callback)(void) = g_assignment_callback;
+    pthread_mutex_unlock(&g_input_mu);
+    dm_feedback_configure_players(dm_input_max_players()); dm_feedback_swap_npad_assignments(*a, *b);
+    signal_style_events(); if (callback) callback();
+}
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStart, void) {}
 HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStop, void) {}
 // Controller applet (system UI): report "1 player, current controller selected" directly. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
 HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports a selection right away",
-          Result, h_hid_ShowCtrl, int32_t *info, const void *arg) { (void)arg; if (info) { info[0] = 1; info[1] = (int32_t)connected_id(); } return RES_OK; }
+          Result, h_hid_ShowCtrl, int32_t *info, const void *arg) {
+    (void)arg; // No unverified casts into the version-specific applet argument.
+    unsigned count = 0, first = connected_id();
+    for (unsigned id = 0; id < dm_input_max_players(); ++id) if (style_of(dm_input_max_players() == 1 ? connected_id() : id)) { if (!count) first = dm_input_max_players() == 1 ? connected_id() : id; ++count; }
+    if (info) { info[0] = (int32_t)count; info[1] = (int32_t)first; }
+    return RES_OK;
+}
 // The SDK's own utility uses type/id/device-index bytes in each handle. Logical
 // devices exist at startup even before a controller is attached; physical output
 // and physical sensor states are separately gated by the front-end lifecycle.
 HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "six-axis sensor handles for the connected Npad style",
           int, h_hid_SixHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
+    dm_feedback_configure_players(dm_input_max_players());
     return id ? dm_feedback_six_handles(h, n, *id, style, connected_id()) : 0;
 }
 HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "enable physical controller sensor states", void, h_hid_SixStart, const uint32_t *h) { if (h) dm_feedback_six_start(*h); }
@@ -157,6 +266,7 @@ HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_1
 HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "native vibration permission; physical output follows device capabilities", unsigned, h_hid_VibPermit, void) { return dm_feedback_vibration_permitted(); }
 HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "two independently addressed native vibration actuators",
           int, h_hid_VibHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
+    dm_feedback_configure_players(dm_input_max_players());
     return id ? dm_feedback_vibration_handles(h, n, *id, style, connected_id()) : 0;
 }
 HLE_FORCE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", "initialize the native vibration actuator", void, h_hid_InitVib, const uint32_t *h) { if (h) dm_feedback_vibration_initialize(*h); }
@@ -186,6 +296,9 @@ HLE_FORCE("_ZN2nn3hid17GetKeyboardStatesEPNS0_13KeyboardStateEi", "keyboard stat
 
 // ---------- SDK 12 interfaces (Engage): single GetNpadState, mode queries / setters, touch screen, gestures, six-axis details, controller colors, etc. ----------
 // In the original all of these read hid shared memory or go through the hid service; the host has no shared memory and answers from the same front-end state as above. Library functions that only modify the game's own buffers (vibration file parse / generate, ControllerSupportArg SetDefault / SetExplainText) keep running in the SDK
+HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_11NpadGcStateERKj", "GameCube state: disconnected, physical pads use full-key style", void, h_hid_StateGc, NpadGcState *s, const uint32_t *id) {
+    (void)id; memset(s, 0, sizeof *s); s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
+}
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", "full-key controller current state", void, h_hid_StateFullKey, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_FULLKEY); }
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", "handheld controller current state", void, h_hid_StateHandheld, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_HANDHELD); }
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", "dual Joy-Con current state (not connected on the host)", void, h_hid_StateJoyDual, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYDUAL); }
@@ -206,8 +319,19 @@ HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "merge single Joy-Cons; 
 // Bound and signalled once for the controller that is connected (the hid service reports the controller already attached at start the same way). Link's Awakening reads no controller state
 // until this event has fired: without it GetNpadState was never called and the title's "Press L+R" never saw a press
 HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "controller style update event: bound, signaled once for the connected controller", void, h_hid_BindStyleEv,
-          const uint32_t *id, void *ev, int clear) { hle_bind_system_event(ev, clear); if (*id == connected_id()) hle_signal_system_event(ev); }
-HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: LED 1", uint8_t, h_hid_Led, const uint32_t *id) { (void)id; return 1; }
+          const uint32_t *id, void *ev, int clear) {
+    if (!id || !ev) return;
+    hle_bind_system_event(ev, clear);
+    unsigned index = *id == NPAD_HANDHELD ? DM_INPUT_MAX_PLAYERS : *id;
+    if (index < DM_INPUT_MAX_PLAYERS + 1) {
+        pthread_mutex_lock(&g_input_mu); g_style_events[index] = ev; pthread_mutex_unlock(&g_input_mu);
+    }
+    if (style_of(*id)) hle_signal_system_event(ev);
+}
+HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED pattern follows logical player", uint8_t, h_hid_Led, const uint32_t *id) {
+    static const uint8_t patterns[8] = {1,2,4,8,3,5,9,6};
+    return id && *id < dm_input_max_players() ? patterns[*id] : 1;
+}
 // NpadControllerColor = { main RGBA, button RGBA }: grey body, black buttons
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }

@@ -26,12 +26,26 @@ static class P {
     [DllImport("libc", SetLastError = true)] static extern int clonefile(string src, string dst, uint flags);
 
     static int Main(string[] a) {
+        // A stored (uncompressed) archive member can be surveyed without making
+        // a second multi-gigabyte copy. The caller supplies its verified range;
+        // every NCA read still uses the ordinary integrity-checked path.
+        (long Offset, long Length)? baseRange = null;
+        var positional = new List<string>();
+        foreach (string arg in a) {
+            if (!arg.StartsWith("--base-range=", StringComparison.Ordinal)) { positional.Add(arg); continue; }
+            if (baseRange != null) throw new ArgumentException("--base-range may appear only once");
+            string[] parts = arg.Substring("--base-range=".Length).Split(':');
+            if (parts.Length != 2 || !long.TryParse(parts[0], out long offset) || !long.TryParse(parts[1], out long length) || offset < 0 || length < 0x104)
+                throw new ArgumentException("--base-range requires a nonnegative decimal offset and positive member length: offset:length");
+            baseRange = (offset, length);
+        }
+        a = positional.ToArray();
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
         if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3]);
-        var basePkg = OpenNsp(ks, a[1]); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
+        var basePkg = OpenNsp(ks, a[1], baseRange); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
         Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("no Program NCA in the base NSP");
         Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program) ?? throw new Exception("no Program NCA in the update NSP");
         Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control);
@@ -86,8 +100,14 @@ static class P {
     }
 
     // Open an NSP (PFS0) or the secure partition of an XCI, import the common tickets, list all NCAs
-    static List<Nca> OpenNsp(KeySet ks, string path) {
-        IFileSystem pfs; var st0 = new LocalStorage(path, FileAccess.Read);
+    static List<Nca> OpenNsp(KeySet ks, string path, (long Offset, long Length)? range = null) {
+        IFileSystem pfs; IStorage st0 = new LocalStorage(path, FileAccess.Read);
+        if (range is { } member) {
+            st0.GetSize(out long total).ThrowIfFailure();
+            if (member.Offset > total || member.Length > total - member.Offset)
+                throw new ArgumentException("base member range exceeds the input file");
+            st0 = new SubStorage(st0, member.Offset, member.Length);
+        }
         byte[] magic = new byte[4]; st0.Read(0x100, magic).ThrowIfFailure();
         if (System.Text.Encoding.ASCII.GetString(magic) == "HEAD") {   // XCI: the card header's magic at 0x100
             var xci = new Xci(ks, st0);

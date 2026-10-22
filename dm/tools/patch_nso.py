@@ -13,6 +13,8 @@ import struct, re, sys, os
 from itertools import combinations
 import lz4.block
 from capstone import *
+from a64_tables import table_base
+from a64_observers import is_call
 
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 d = open(src, 'rb').read()
@@ -197,6 +199,14 @@ CUTS = {
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
 OBS = {
+  # Smash Ultimate 13.0.5 main: observe actual mapped controller assignment,
+  # committed fighter status transitions, and the ControlModule heartbeat.
+  # Guard bindings are read from the game's current custom control mapping.
+  '21450c647b8c5940ed5b68218ea128fd': [
+    (0x1750dd0, 21, 'd10203ff', 'map_controls entry: actual controller and custom ZL/ZR mappings; orig sub sp,sp,#0x80'),
+    (0x4def24, 22, 'f9407660', 'committed fighter status after pre/init and work cleanup, immediately after BLR: x19 StatusModule; orig ldr x0,[x19,#0xe8]'),
+    (0x6b92c0, 23, 'd101c3ff', 'ControlModule exec heartbeat: expire stale guard effects; orig sub sp,sp,#0x70'),
+  ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
   '646761f643afebb379edd5e6a5151af2': [
@@ -205,6 +215,8 @@ OBS = {
   ],
 }
 BUILD_ID = d[0x40:0x50].hex()
+OBS_PREV = {off: struct.unpack_from('<I', IMG, off - 4)[0]
+            for off, *_ in OBS.get(BUILD_ID, []) if off >= 4}
 cuts = list(CUTS.get(BUILD_ID, []))
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
@@ -640,26 +652,9 @@ def jump_offsets(insl, j):
             if cmp: break
     if not cmp: return None
     n = int(cmp.op_str.split('#')[1], 0) + 1
-    k = insl.index(ld); lo = page = None
-    for p in reversed(insl[max(0, k - 256):k]):   # the writer chain of the table base
-        _, w = p.regs_access()
-        if not any(p.reg_name(r) == rb for r in w): continue
-        if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
-        if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): page = p.operands[1].imm
-        break
-    if page is None: return None
-    tb = page + lo
+    tb = table_base(insl, insl.index(ld), rb)
+    if tb is None or not 0 <= tb <= len(IMG) - 4 * n: return None
     return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-def table_base(insl, k, rb):
-    """Address the table-base register rb holds at insl[k]: its writer chain before k must be add rb,rb,#lo after adrp rb (as in jump_offsets); None otherwise"""
-    lo = None
-    for p in reversed(insl[max(0, k - 256):k]):
-        _, w = p.regs_access()
-        if not any(p.reg_name(r) == rb for r in w): continue
-        if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
-        if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): return p.operands[1].imm + lo
-        return None
-    return None
 def jump_adr_offsets(insl, j):
     """Entries relative to an adr rather than to the table (Tears of the Kingdom main+0x393bb0): cmp w0,#5; b.hi; ...; adr x18,#L; ldrsw x1,[x17,x0,lsl #2];
     add x18,x18,x1; br x18 → target = L + entry, with the table base x17 from adrp + add. Tried only where jump_offsets finds nothing. Returns all targets, or None if not recognized"""
@@ -807,10 +802,12 @@ obs = list(OBS.get(BUILD_ID, []))
 for off, oid, ow, why in obs:
     w = struct.unpack_from('<I', IMG, off)[0]
     assert f'{w:08x}' == ow, f'observation gate original instruction mismatch {off:#x}: {w:08x}'
-    # Function entries, or the instruction right after a bl, only: dm_gate writes back only x0–x8 / x30, and host C code may modify x9–x17; at entry these carry no values under AAPCS64 (arguments are only in x0–x7 / x8),
+    # Function entries, or the instruction right after BL/BLR, only: dm_gate writes back only x0–x8 / x30, and host C code may modify x9–x17; at entry these carry no values under AAPCS64 (arguments are only in x0–x7 / x8),
     # and right after a call returns the callee was free to clobber them anyway (x16 / x17 are the veneer registers)
-    after_bl = off >= 4 and struct.unpack_from('<I', IMG, off - 4)[0] >> 26 == 0x25
-    assert off in set(starts) or after_bl, f'observation gate neither at a function entry nor after a bl {off:#x}'
+    # BLR has already been rewritten into a host-dispatch branch above. Inspect
+    # its original word, while preserving the same AAPCS scratch-register rule.
+    after_call = off >= 4 and is_call(OBS_PREV[off])
+    assert off in set(starts) or after_call, f'observation gate neither at a function entry nor after a call {off:#x}'
     assert off < TEXT_END and off not in kinds and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'observation gate conflicts with a rewrite site {off:#x}'
     put_branch(off, site_obs(off, oid, w)); stat('obs')
 

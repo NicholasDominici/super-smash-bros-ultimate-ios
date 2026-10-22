@@ -1,79 +1,104 @@
 # Signing and installation
 
-Follow the numbered steps at the bottom of README.md first. The normal command
-uses Xcode's signed-in Apple account to obtain an exact-app **development** profile:
+Start with the numbered instructions at the bottom of README.md. The builder
+produces an unsigned private app or IPA; `tools/sign_install.py` signs a separate
+copy and installs only when given `--install`. Neither helper deletes or
+launches an installed app.
+
+For a staged app:
 
 ```sh
-python tools/sign_install.py --ipa /path/to/Odyssey-unsigned.ipa \
+python tools/sign_install.py --app /private/Smash-unsigned.app \
   --team YOUR_TEAM_ID --device YOUR_DEVICE_ID --install
 ```
 
-It extracts the private IPA beside it, signs a separate copy, verifies the
-signature and entitlements, exports a signed IPA and optionally installs the
-app. It never deletes or launches an installed game. Its private signing work
-directory contains the provisioning material and receipt; do not publish it.
-Use a new `--output` path when signing again; existing files are not overwritten.
+For an IPA, use `--ipa /private/Smash-unsigned.ipa` instead. The development
+profile must allow the exact bundle ID, the intended device and both capabilities:
 
-The signing helper supports only development profiles. The provisioning profile
-must allow the exact bundle ID, the intended UDID, and Increased Memory Limit,
-and its certificate/private key must be in the Mac's Keychain. This is the
-[normal memory entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.increased-memory-limit),
-not the separate Increased Debugging Memory Limit entitlement. The latter is not
-used here. More RAM permission does not guarantee every device has enough RAM.
+- [Increased Memory Limit](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.increased-memory-limit)
+- [Extended Virtual Addressing](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.extended-virtual-addressing)
+
+The currently checked shader toolchain uses **Xcode 27.1 (27A9275)** and
+**spirv-cross 1.4.363.0**, with the bundled pinned translator. The lock checks
+actual binary/compiler fingerprints. A different release may require a
+contributor to rebuild and validate the shader chain; changing the lock alone
+does not establish compatibility.
+
+Smash reserves a large sparse virtual address range. Extended Virtual Addressing
+permits that address layout; it does not allocate that much physical RAM or
+make a low-memory device sufficient. Increased Debugging Memory Limit is a
+separate entitlement and is not used by this project.
+
+The helper reads the compiled app's `NativeBuild.plist`, validates its bundle,
+CloudKit and addressing requirements against the profile, signs the executable,
+checks the resulting signature and compares the actual entitlements. A successful
+signature check is not a gameplay/memory-performance result.
 
 ## Profile setup
 
-If automatic provisioning fails:
+Automatic provisioning uses the Apple account already signed into Xcode.
+If it fails:
 
-1. In Xcode Settings → Apple Accounts, confirm the correct developer team is
-   signed in and has a development certificate.
+1. In Xcode → Settings → Apple Accounts, select the intended developer team and
+   ensure it has a development certificate with its private key on this Mac.
 2. In [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/identifiers/list),
-   create/select an explicit App ID matching the bundle ID passed to the build.
-3. Enable **Increased Memory Limit** for that App ID. If using cloud saves, also
-   enable **iCloud → CloudKit** and associate your container (docs/ICLOUD.md).
-4. Register the device's **UDID** under Devices. `devicectl` also displays a
-   CoreDevice identifier; if using the developer website, copy the hardware UDID
-   from Xcode's device details, not a different local identifier.
-5. Create an **iOS App Development** profile for that App ID, your development
-   certificate, and the devices. Download it outside the source checkout.
-6. Rerun with the profile:
+   create/select an explicit App ID matching the builder's `--bundle-id`.
+3. Enable **Increased Memory Limit** and **Extended Virtual Addressing**. For
+   optional cloud saves, also enable iCloud → CloudKit and associate your own
+   container; see ICLOUD.md.
+4. Register the device's **hardware UDID**. `xcrun devicectl list devices` can
+   show a CoreDevice identifier; `xcrun devicectl device info details --device
+   DEVICE_ID` or Xcode's device details shows the hardware UDID. The helper can
+   resolve a reachable CoreDevice identifier for automatic provisioning.
+5. Create an **iOS App Development** profile for that exact App ID, your
+   certificate and the registered devices. Download it outside the checkout.
+6. Sign with the profile:
 
    ```sh
-   python tools/sign_install.py --ipa /path/to/Odyssey-unsigned.ipa \
-     --profile /path/to/Odyssey.mobileprovision \
+   python tools/sign_install.py --app /private/Smash-unsigned.app \
+     --profile /private/Smash.mobileprovision \
      --device YOUR_HARDWARE_UDID --install
    ```
 
-For automatic signing, pass the hardware UDID too so profile validation can
-confirm it. `xcrun devicectl device info details --device DEVICE_ID` shows the
-hardware details if the summary list only shows a CoreDevice identifier.
+Profiles with a wildcard bundle, missing capabilities, wrong device, expiry or
+incompatible cloud environment are rejected. Keep provisioning files,
+certificates, receipts and signed apps private.
+
+## Updating and storage
+
+Save in-game, fully close Smash and back up its `Documents/save` folder before
+installing a replacement. Keep the same bundle ID and developer team. Deleting
+the app removes its local save container. Do not uninstall it as an installation
+troubleshooting shortcut.
+
+Use USB for the large first transfer and keep the device unlocked. A staged
+`--app-only` build uses APFS clones where supported and avoids an IPA pack/extract
+round trip; another volume/filesystem may require full resource copies. The
+signer also clones a separate app before signing. Its default output name ends
+in `-signed.app` or `-signed.ipa`; an existing output is not overwritten.
 
 ## Common problems
 
-| Problem | Next step |
+| Problem | Action |
 | --- | --- |
-| Missing .NET 10 | Install the .NET 10 SDK/runtime; a newer major runtime alone cannot run the pinned translator. |
-| Xcode license/components missing | Open Xcode once, accept the license and finish component installation. |
-| No Apple account/provisioning permission | Sign in in Xcode, select the correct team, and check the private `provision.log`. |
-| Memory entitlement absent | Enable Increased Memory Limit for your explicit App ID and regenerate the profile. Free-team support is not verified. |
-| Device not in profile | Register its hardware UDID and regenerate the development profile. |
-| Device locked/unavailable | Unlock it, trust the Mac, enable Developer Mode and keep it awake. USB is best for the large first install. |
-| Wrong game version/hash | Use the unmodified base game plus update 1.4.1; see INPUTS.md. |
-| Black screen / app exits | Check device memory, iOS version and `log.txt`. Older/lower-memory devices are unverified. |
-| Output already exists | Use a new signed output filename. Keep a backup before cleaning old private build folders. |
+| Missing .NET 10 | Install the .NET 10 SDK/runtime; a newer runtime alone does not run the pinned translator. |
+| Tool-chain fingerprint mismatch | Use the pinned Metal/spirv-cross/translator toolchain; do not update the lock merely to bypass a failed check. |
+| Shader failure or incomplete manifest | Read the private shader log and `*-shader-completeness.json`; only the exact documented geometry exception can be allowed. |
+| Capture receipt/fingerprint mismatch | Preserve the old evidence and make a new capture from unchanged inputs/source; do not edit a receipt to bypass the check. |
+| Wrong module hash | Supply the unmodified base plus update 13.0.5, or a complete matching merged extraction. |
+| Missing signing capability | Enable both memory/addressing capabilities on the explicit App ID and regenerate its profile. |
+| Device not allowed or unreachable | Register the hardware UDID, trust the Mac, enable Developer Mode, unlock and keep it nearby. |
+| Work/output already exists | Choose a new build/output path; preserve backups and existing builds. |
+| Graphics missing or app exits | Check VALIDATION.md and private `log.txt`; this bring-up has unresolved graphics and live-test gaps. |
 
 Apple documents [Developer Mode](https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device)
-and [installation on registered devices](https://developer.apple.com/documentation/xcode/distributing-your-app-to-registered-devices).
+and [registered-device installation](https://developer.apple.com/documentation/xcode/distributing-your-app-to-registered-devices).
 
-## Installing on a friend's device
+## A friend's iPhone
 
-A development-signed IPA runs only on devices in its provisioning profile.
-Register the additional phone, sign again with a profile containing it, and
-install using the Mac helper, Xcode, or Apple Configurator. Sending the file by
-AirDrop alone does not install it. The friend can also build/sign independently
-using their own files and account. Don't commit or publish the resulting game IPA.
-
-Ad hoc distribution is a separate signing flow requiring a distribution
-certificate/profile and registered devices; this helper doesn't implement it.
-Do not simply change a Development CloudKit entitlement to Production: cloud
-environments store different data, and production requires a deployed schema.
+A development-signed IPA runs only on devices allowed by its profile. Register
+the friend's device, obtain a matching development profile and sign again, or
+let the friend build with their own game files and developer account. Sending
+an IPA by AirDrop does not install it. Builds expire with their signing profile
+and must be renewed. This helper does not implement ad hoc/App Store distribution;
+do not publish game-bearing apps, IPAs or signing material.

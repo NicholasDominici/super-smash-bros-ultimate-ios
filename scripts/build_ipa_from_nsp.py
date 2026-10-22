@@ -630,7 +630,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g):
     mods = g.words('modules')
     PROG.stage('rewrite', step='checking the inputs')
     kf = out.with_name(out.name + '.key')
-    key = fingerprint(('files', [repo / 'dm/tools/patch_nso.py'] + [exe_dir / m for m in mods]), mods, capstone.__version__, {k: env.get(k) for k in ('DM_PATCH_FRONT',)})
+    key = fingerprint(('files', [repo / 'dm/tools' / name for name in ('patch_nso.py', 'a64_tables.py', 'a64_observers.py')] + [exe_dir / m for m in mods]), mods, capstone.__version__, {k: env.get(k) for k in ('DM_PATCH_FRONT',)})
     if all((out / f'{m}.patched.bin').is_file() for m in mods) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}, reused (inputs unchanged)'); return
     tmp = out.with_name(out.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True); logs.mkdir(parents=True, exist_ok=True)

@@ -2,12 +2,15 @@
 #pragma once
 #include <pthread.h>
 #include <stdint.h>
+#include <stddef.h>
+int dm_guest_copy_mapped(uint64_t address, void *out, size_t length);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
-#define MAX_MOD 8
+#define MAX_MOD 8              // Static NSOs; dynamic NROs have a separate private registry.
+#define DM_NRO_MAX 512
 #define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
@@ -16,12 +19,12 @@ typedef struct { int64_t d_tag; union { uint64_t d_val, d_ptr; } d_un; } Elf64_D
 typedef struct { uint64_t r_offset, r_info; int64_t r_addend; } Elf64_Rela;
 #define ELF64_R_SYM(i) ((i) >> 32)
 #define ELF64_R_TYPE(i) ((i) & 0xffffffff)
-enum { DT_INIT = 12, DT_RELA = 7, DT_RELASZ = 8, DT_JMPREL = 23, DT_PLTRELSZ = 2, DT_SYMTAB = 6, DT_STRTAB = 5,
+enum { DT_INIT = 12, DT_FINI = 13, DT_RELA = 7, DT_RELASZ = 8, DT_JMPREL = 23, DT_PLTRELSZ = 2, DT_SYMTAB = 6, DT_STRTAB = 5,
        DT_INIT_ARRAY = 25, DT_INIT_ARRAYSZ = 27, DT_RELRSZ = 35, DT_RELR = 36 };
 enum { R_AARCH64_ABS64 = 257, R_AARCH64_GLOB_DAT = 1025, R_AARCH64_JUMP_SLOT = 1026, R_AARCH64_RELATIVE = 1027 };
 #define ELF64_ST_BIND(i) ((i) >> 4)            // symbol binding: 0 = STB_LOCAL, 2 = STB_WEAK
 #define ELF64_ST_VISIBILITY(o) ((o) & 3)       // visibility: 0 = STV_DEFAULT
-enum { STB_LOCAL = 0, STB_WEAK = 2, STV_DEFAULT = 0 };
+enum { STB_LOCAL = 0, STB_WEAK = 2, STV_DEFAULT = 0, STT_FUNC = 2 };
 
 // Run-time state of one NSO module
 typedef struct {
@@ -39,8 +42,41 @@ typedef struct {
     const char *strtab;
     unsigned nsym;
     uint32_t *symh; unsigned symh_mask;   // Name hash table of defined symbols (open addressing, stores symbol indices; for a duplicated name only the smallest index is kept = the first hit of a linear scan)
-    uint64_t init, init_array, init_arraysz;   // init = DT_INIT (the module's _init: registers the DSO and runs this module's init_array)
+    uint64_t init, init_array, init_arraysz, fini;   // DT_INIT/_init and DT_FINI/_fini own their arrays.
+    unsigned dynamic, active, retiring, initialized, committed;
+    uint64_t load_serial;
+    void *nro_sdk_object;
+    const struct dm_nro_catalog_entry *nro_catalog;
+    uint64_t dependencies[(DM_NRO_MAX + 63) / 64];   // Native bindings keep their providers resident until unload.
 } module_t;
+
+// Private build-generated catalogs contain identity metadata only. Each NRO's
+// rewritten code is embedded/signed with the static executable; runtime loading
+// remaps those signed pages and never executes the caller's original buffer.
+typedef struct { const uint8_t *x0, *w, *x1; uint64_t x0_size, w_size, x1_size; } dm_nro_embed;
+typedef struct dm_nro_catalog_entry {
+    const char *name;
+    uint32_t image_size, bss_size;
+    uint8_t sha256[32];
+    dm_nro_embed embed;
+} dm_nro_catalog_entry;
+typedef struct { uint32_t image_size; uint8_t sha256[32]; } dm_nrr_catalog_entry;
+typedef struct { const char *name; uint32_t module_index, type; uint64_t offset; } dm_nro_export_entry;
+extern const dm_nro_catalog_entry dm_nro_catalog[] __attribute__((weak_import));
+extern const unsigned dm_nro_catalog_count __attribute__((weak_import));
+extern const dm_nrr_catalog_entry dm_nrr_catalog[] __attribute__((weak_import));
+extern const unsigned dm_nrr_catalog_count __attribute__((weak_import));
+extern const dm_nro_export_entry dm_nro_exports[] __attribute__((weak_import));
+extern const unsigned dm_nro_export_count __attribute__((weak_import));
+int dm_nro_enabled(void);
+void dm_nro_lock(void);
+void dm_nro_unlock(void);
+const dm_nro_catalog_entry *dm_nro_identify(const void *image);
+module_t *dm_nro_load(const dm_nro_catalog_entry *entry);
+int dm_nro_commit(module_t *module);
+int dm_nro_unload(module_t *module);
+size_t dm_nro_memory_bytes(int bss_only);
+void gate_unregister_range(uint64_t start, uint64_t size);
 
 extern module_t g_mod[MAX_MOD];
 extern int g_nmod;
@@ -59,7 +95,9 @@ module_t *module_of(const void *p);
 // Gate dispatch: rewritten svc / timer reads come in through the common entry, ret_addr = the return point of that gate block, regs points to the saved x0..x30
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
 // Observation gates (rewriter OBS table; numbering matches patch_nso.py): read-only callbacks, called on a gate hit once attached
-enum { OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20, OBS_MAX = 21 };   // Metroid Dread 2.1.0's movie request ring (hle_movie.c)
+enum { OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20,
+       OBS_SMASH_MAP_CONTROLS = 21, OBS_SMASH_STATUS_COMMITTED = 22,
+       OBS_SMASH_CONTROL_HEARTBEAT = 23, OBS_MAX = 24 };
 void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
 int gate_obs_present(int id);
 uint64_t now_ns(void);

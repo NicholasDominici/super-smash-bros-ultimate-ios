@@ -8,10 +8,87 @@
 #include <unistd.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+#include <stdatomic.h>
 #include "hle.h"
 
 module_t g_mod[MAX_MOD];
 int g_nmod;
+static int g_static_nmod;
+static char g_module_dir[1024];
+static uint64_t g_load_serial;
+static module_t g_nro[DM_NRO_MAX];
+// Main's PLT slots may name functions supplied only by later-loaded NROs.
+// Admit only exact catalog exports; a premature call must never return fake 0.
+enum { NRO_DEFERRED_MAX = 4096 };
+typedef struct { uint64_t *slot; const dm_nro_export_entry *export; } nro_deferred;
+static nro_deferred g_nro_deferred[NRO_DEFERRED_MAX];
+static unsigned g_nro_deferred_count;
+static void nro_deferred_unavailable(void) { die("NRO function called before its provider committed, or after unload"); }
+static const dm_nro_export_entry *nro_export_find(const char *name) {
+    if (!dm_nro_enabled()) return NULL;
+    unsigned lo = 0, hi = dm_nro_export_count;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        const dm_nro_export_entry *e = &dm_nro_exports[mid];
+        int order = strcmp(name, e->name);
+        if (!order) return e->module_index < dm_nro_catalog_count ? e : NULL;
+        if (order < 0) hi = mid; else lo = mid + 1;
+    }
+    return NULL;
+}
+static uint64_t nro_defer_import(module_t *m, uint64_t *slot, const char *name, unsigned type, int64_t addend) {
+    const dm_nro_export_entry *e = nro_export_find(name);
+    if (!e) return 0;
+    if (e->type != STT_FUNC || (type != R_AARCH64_GLOB_DAT && type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_ABS64) || addend ||
+        ((uintptr_t)slot & 7) || (uint8_t *)slot < m->base + m->data_off || (uint8_t *)slot + 8 > m->base + m->size)
+        die("unsupported deferred NRO import %s", name);
+    if (g_nro_deferred_count == NRO_DEFERRED_MAX) die("deferred NRO import capacity exceeded");
+    g_nro_deferred[g_nro_deferred_count++] = (nro_deferred){slot, e};
+    return (uint64_t)nro_deferred_unavailable;
+}
+static uint64_t nro_deferred_target(module_t *m, const dm_nro_export_entry *e) {
+    if (!m || !m->base || e->module_index != (unsigned)(m - g_nro)) return 0;
+    uintptr_t target = (uintptr_t)module_sym(m, e->name), base = (uintptr_t)m->base;
+    return target >= base && target - base == e->offset && e->offset < m->text_end ? target : 0;
+}
+static int nro_deferred_validate(module_t *m) {
+    for (unsigned i = 0; i < g_nro_deferred_count; i++) {
+        const nro_deferred *d = &g_nro_deferred[i];
+        if (d->export->module_index == (unsigned)(m - g_nro) && !nro_deferred_target(m, d->export)) {
+            LOG("[RED] NRO %s does not define its admitted export %s", m->name, d->export->name); return 0;
+        }
+    }
+    return 1;
+}
+static void nro_deferred_publish(module_t *m, int available) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < g_nro_deferred_count; i++) {
+        const nro_deferred *d = &g_nro_deferred[i];
+        if (d->export->module_index != (unsigned)(m - g_nro)) continue;
+        uint64_t target = available ? nro_deferred_target(m, d->export) : (uint64_t)nro_deferred_unavailable;
+        if (!target) die("NRO admitted export changed after initialization: %s", d->export->name);
+        atomic_store_explicit((_Atomic uint64_t *)d->slot, target, memory_order_release); count++;
+    }
+    if (count) LOG("NRO %s: %s %u deferred static function imports", m->name, available ? "committed" : "withdrew", count);
+}
+// Address introspection runs in signal/GC paths. Publish immutable generations
+// rather than exposing mutable dynamic slots or acquiring the loader mutex.
+// These small metadata records live until process exit; mapped code/data do not.
+typedef struct nro_region { module_t info; struct nro_region *next; } nro_region;
+static _Atomic(nro_region *) g_nro_regions[DM_NRO_MAX];
+static _Atomic unsigned g_nro_region_count;
+static nro_region *g_nro_region_history;
+static pthread_once_t g_module_lock_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t g_module_lock;
+static void module_lock_init(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_module_lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+void dm_nro_lock(void) { pthread_once(&g_module_lock_once, module_lock_init); pthread_mutex_lock(&g_module_lock); }
+void dm_nro_unlock(void) { pthread_mutex_unlock(&g_module_lock); }
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 enum { KEY_K18, KEY_KTLS, KEY_KTLR, KEY_KGATE, KEY_N };
 
@@ -49,6 +126,7 @@ static void parse_dynamic(module_t *m) {
         case DT_SYMTAB: m->symtab = (const Elf64_Sym *)(m->base + d->d_un.d_ptr); break;
         case DT_STRTAB: m->strtab = (const char *)(m->base + d->d_un.d_ptr); break;
         case DT_INIT: m->init = d->d_un.d_ptr; break;
+        case DT_FINI: m->fini = d->d_un.d_ptr; break;
         case DT_INIT_ARRAY: m->init_array = d->d_un.d_ptr; break;
         case DT_INIT_ARRAYSZ: m->init_arraysz = d->d_un.d_val; break;
     }
@@ -80,6 +158,7 @@ static void build_symhash(module_t *m) {
 }
 static unsigned long g_symchk_n, g_symchk_bad;
 void *module_sym(module_t *m, const char *name) {
+    if (!m || !m->base || !name) return NULL;
     unsigned long nq; (void)nq;
     if (!m->symh) return module_sym_linear(m, name);
     void *r = NULL;
@@ -93,15 +172,46 @@ void *module_sym(module_t *m, const char *name) {
     return r;
 }
 void *guest_sym(const char *name) {
-    for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return p; }
-    return NULL;
+    if (!name) return NULL;
+    dm_nro_lock();
+    void *found = NULL; uint64_t serial = UINT64_MAX;
+    for (int i = 0; i < g_nmod; i++) { found = module_sym(&g_mod[i], name); if (found) break; }
+    if (!found) for (unsigned i = 0; i < DM_NRO_MAX; i++) {
+        module_t *m = &g_nro[i];
+        if (!m->active) continue;
+        void *p = module_sym(m, name);
+        if (p && m->load_serial < serial) { found = p; serial = m->load_serial; }
+    }
+    dm_nro_unlock();
+    return found;
 }
 // For modules with the patch area before the base (patch_off < 0) addresses in the patch area count too, as for modules whose patch area follows the image (crash reports, the GC pause's "in guest code" test)
 module_t *module_of(const void *p) {
     for (int i = 0; i < g_nmod; i++) {
         const uint8_t *b = g_mod[i].base;
+        if (!b) continue;
         if ((const uint8_t *)p >= b && (const uint8_t *)p < b + g_mod[i].size) return &g_mod[i];
         if (g_mod[i].patch_off < 0 && (const uint8_t *)p >= b + g_mod[i].patch_off && (const uint8_t *)p < b + g_mod[i].patch_off + g_mod[i].patch_len) return &g_mod[i];
+    }
+    unsigned region_count = atomic_load_explicit(&g_nro_region_count, memory_order_acquire);
+    for (unsigned i = 0; i < region_count; i++) {
+        nro_region *region = atomic_load_explicit(&g_nro_regions[i], memory_order_acquire);
+        if (!region) continue;
+        module_t *m = &region->info;
+        uintptr_t address = (uintptr_t)p, base = (uintptr_t)m->base;
+        if (address >= base && address - base < m->size) return m;
+        if (m->patch_off < 0 && address >= base + m->patch_off && address - (base + m->patch_off) < m->patch_len) return m;
+    }
+    return NULL;
+}
+
+// Called only while the recursive loader mutex is held. Unlike module_of's
+// immutable diagnostic snapshots this returns the canonical dependency owner.
+static module_t *dynamic_provider(uint64_t address) {
+    for (unsigned i = 0; i < DM_NRO_MAX; i++) {
+        module_t *m = &g_nro[i]; uint64_t base = (uint64_t)m->base;
+        if (m->base && address >= base && address - base < m->size) return m;
+        if (m->base && m->patch_off < 0 && address >= base + m->patch_off && address - (base + m->patch_off) < m->patch_len) return m;
     }
     return NULL;
 }
@@ -124,7 +234,12 @@ int dm_sdk_major(void) {
 
 // Cross-module symbol resolution: first look for a definition in the loaded modules, and only if not found hand over to HLE / stubs
 static uint64_t resolve_sym(module_t *m, const char *name) {
-    for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return (uint64_t)p; }
+    void *p = guest_sym(name);
+    if (p) return (uint64_t)p;
+    if (m->dynamic && !hle_implements(name)) {
+        LOG("[RED] NRO %s has unresolved import %s", m->name, name);
+        return 0;
+    }
     return resolve_import(m, name);
 }
 
@@ -243,7 +358,7 @@ static unsigned relr_apply(module_t *m, uint64_t relr, uint64_t relrsz, uint64_t
     return n;
 }
 
-static void relocate(module_t *m) {
+static int relocate(module_t *m) {
     uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0, relr = 0, relrsz = 0;
     for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
         case DT_RELA: rela = d->d_un.d_ptr; break;
@@ -262,6 +377,7 @@ static void relocate(module_t *m) {
             const Elf64_Rela *r = &tabs[t][i];
             uint64_t *where = (uint64_t *)(m->base + r->r_offset);
             unsigned type = ELF64_R_TYPE(r->r_info), si = ELF64_R_SYM(r->r_info);
+            if (!type) continue;  // R_AARCH64_NONE has no target or symbol to apply.
             if (type == R_AARCH64_RELATIVE) { *where = (uint64_t)m->base + r->r_addend; cnt[0]++; continue; }
             const Elf64_Sym *s = &m->symtab[si];
             uint64_t v = (uint64_t)force_lookup(m->strtab + s->st_name);
@@ -279,12 +395,23 @@ static void relocate(module_t *m) {
             const char *nm = m->strtab + s->st_name;
             int weak0 = !v && !s->st_shndx && ELF64_ST_BIND(s->st_info) == STB_WEAK && !guest_sym(nm) && !hle_implements(nm);
             if (weak0 && nweak0++ < 8) LOG("%s: undefined weak %s bound to 0", m->name, nm);
+            if (!v && !weak0 && !m->dynamic && !s->st_shndx && !guest_sym(nm) && !hle_implements(nm))
+                v = nro_defer_import(m, where, nm, type, r->r_addend);
             if (!v && !weak0) v = resolve_sym(m, nm);
+            if (!v && !weak0 && m->dynamic) return 0;
+            if (m->dynamic && v) {
+                module_t *provider = dynamic_provider(v);
+                if (provider && provider != m && provider->dynamic) {
+                    unsigned slot = (unsigned)(provider - g_nro);
+                    m->dependencies[slot / 64] |= 1ull << (slot % 64);
+                }
+            }
             if (type == R_AARCH64_JUMP_SLOT) { *where = v; cnt[2]++; }
             else { *where = v + r->r_addend; cnt[1]++; }       // ABS64 / GLOB_DAT
         }
     LOG("%s: reloc relative=%d relr=%u abs/glob=%d jump=%d%s", m->name, cnt[0], nrelr, cnt[1], cnt[2], nint ? " (some bound to an earlier module's definition)" : "");
     if (nint > 8) LOG("%s: %d bound to an earlier module's definition in all", m->name, nint);
+    return 1;
 }
 
 // DM_LOADHASH=1 (diagnostics): after loading, output an address-independent sha256 per module, to prove that the load results of "early start / no early start" are byte-identical.
@@ -334,7 +461,7 @@ void loader_hash_log(void) {
     }
 }
 
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE || defined(DM_TEST_SIGNED_EMBED)
 // iOS does not allow code loaded at run time to execute, and Apple allows an executable only one segment with execute permission (ITMS-90999): the image is compiled into this executable by dm/ios/tools/gen_embed.py --
 // the two code blocks (original text, patch area) are sections in __TEXT, and W (the rest of ro + data + bss) is a separate RW segment. The three blocks are not adjacent in the file; here one contiguous address range is reserved,
 // and they are vm_remap'ed back at their original relative positions: code pages with copy=FALSE (sharing the same signed pages with __TEXT, r-x), W with copy=TRUE (copy-on-write, paged only when used).
@@ -350,8 +477,17 @@ static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned lo
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
     char sx0[17], sx1[17], dm[17]; snprintf(sx0, sizeof sx0, "__dm%sx0", m->name); snprintf(sx1, sizeof sx1, "__dm%sx1", m->name); snprintf(dm, sizeof dm, "__DM%sW", m->name);
-    unsigned long z0, zw, z1;
-    const uint8_t *x0 = getsectiondata(IMAGE_MH, "__TEXT", sx0, &z0), *w = getsectiondata(IMAGE_MH, dm, "__img", &zw), *x1 = getsectiondata(IMAGE_MH, "__TEXT", sx1, &z1);
+    unsigned long z0 = 0, zw = 0, z1 = 0;
+    const uint8_t *x0, *w, *x1;
+    if (m->dynamic && m->nro_catalog) {
+        const dm_nro_embed *embed = &m->nro_catalog->embed;
+        x0 = embed->x0; w = embed->w; x1 = embed->x1;
+        z0 = embed->x0_size; zw = embed->w_size; z1 = embed->x1_size;
+    } else {
+        x0 = getsectiondata(IMAGE_MH, "__TEXT", sx0, &z0);
+        w = getsectiondata(IMAGE_MH, dm, "__img", &zw);
+        x1 = getsectiondata(IMAGE_MH, "__TEXT", sx1, &z1);
+    }
     if (!x0 || !w || !x1) die("embedded sections %s / %s / %s missing", sx0, dm, sx1);
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
     int front = m->patch_off < 0;
@@ -365,7 +501,7 @@ static void map_image(module_t *m, const char *dir) {
     base += pre;
     remap_at(m, base, x0, z0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     remap_at(m, base + z0, w, zw, TRUE, VM_PROT_READ | VM_PROT_WRITE);
-    remap_at(m, base + m->patch_off, x1, z1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (z1) remap_at(m, base + m->patch_off, x1, z1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     m->base = (uint8_t *)base; install_key_page(m);
 }
 #else
@@ -411,6 +547,9 @@ static void map_image(module_t *m, const char *dir) {
 #endif
 
 void load_modules(const char *dir, const char **names, int n) {
+    if (n < 1 || n > 8 || g_nmod) die("invalid static module count or duplicate initialization");
+    if (strlcpy(g_module_dir, dir, sizeof g_module_dir) >= sizeof g_module_dir) die("module directory path too long");
+    g_static_nmod = n;
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
@@ -430,7 +569,7 @@ void load_modules(const char *dir, const char **names, int n) {
         g_nmod++;
     }
     force_init();
-    t = now_ns(); for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]); tr = now_ns() - t;
+    t = now_ns(); for (int i = 0; i < g_nmod; i++) (void)relocate(&g_mod[i]); tr = now_ns() - t;
     force_check();
     { void hlecount_seal(void); hlecount_seal(); }   // DM_HLECOUNT: relocation done, seal the counting stub pages as read-only executable
     if (getenv("DM_SYMCHECK")) LOG("DM_SYMCHECK: %lu symbol lookups at load time, hash and linear disagree %lu", g_symchk_n, g_symchk_bad);
@@ -441,10 +580,161 @@ void load_modules(const char *dir, const char **names, int n) {
 // Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {
-    for (int i = 0; i < g_nmod; i++) {
+    for (int i = 0; i < g_static_nmod; i++) {
         module_t *m = &g_mod[i];
         if (!m->init) continue;
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);
         ((void (*)(void))(m->base + m->init))();
     }
+}
+
+// NRO loading is deliberately enabled only for the SDK ABI inspected for this
+// Smash build. Other titles retain their existing failure result until ported.
+int dm_nro_enabled(void) {
+    if (&dm_nro_catalog_count == NULL || dm_nro_catalog == NULL || !dm_nro_catalog_count || dm_nro_catalog_count > 512 ||
+        &dm_nrr_catalog_count == NULL || dm_nrr_catalog == NULL || !dm_nrr_catalog_count || dm_nrr_catalog_count > 64 ||
+        &dm_nro_export_count == NULL || dm_nro_exports == NULL || !dm_nro_export_count || dm_nro_export_count > 65536)
+        return 0;
+    if (strcmp(dm_main_build(), "21450c647b8c5940ed5b68218ea128fd")) return 0;
+    for (int i = 0; i < g_static_nmod; i++)
+        if (!strcmp(g_mod[i].name, "sdk")) return !strcmp(g_mod[i].build_id, "5fd4f531c1195e9e5510c9e73f22cd39");
+    return 0;
+}
+
+const dm_nro_catalog_entry *dm_nro_identify(const void *image) {
+    if (!dm_nro_enabled() || !image || memcmp((const uint8_t *)image + 0x10, "NRO0", 4)) return NULL;
+    uint32_t size, bss;
+    memcpy(&size, (const uint8_t *)image + 0x18, 4);
+    memcpy(&bss, (const uint8_t *)image + 0x38, 4);
+    if (size < 0x80 || size > 256u * 1024 * 1024 || bss > 256u * 1024 * 1024) return NULL;
+    int candidate = 0;
+    for (unsigned i = 0; i < dm_nro_catalog_count; i++)
+        candidate |= dm_nro_catalog[i].image_size == size && dm_nro_catalog[i].bss_size == bss;
+    if (!candidate) return NULL;
+    uint8_t hash[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(image, size, hash);
+    for (unsigned i = 0; i < dm_nro_catalog_count; i++) {
+        const dm_nro_catalog_entry *entry = &dm_nro_catalog[i];
+        if (entry->image_size == size && entry->bss_size == bss && !memcmp(entry->sha256, hash, sizeof hash)) return entry;
+    }
+    return NULL;
+}
+
+static void dynamic_release(module_t *m) {
+    atomic_store_explicit(&g_nro_regions[m - g_nro], NULL, memory_order_release);
+    uint64_t pre = m->patch_off < 0 ? (uint64_t)-m->patch_off : 0;
+    if (m->base) {
+        gate_unregister_range((uint64_t)m->base - pre, m->size + pre);
+#if TARGET_OS_IPHONE || defined(DM_TEST_SIGNED_EMBED)
+        vm_deallocate(mach_task_self(), (vm_address_t)m->base - pre, m->size + pre);
+#else
+        munmap(m->base - pre, m->size + pre);
+#endif
+    }
+    free(m->symh);
+    memset(m, 0, sizeof *m);
+}
+
+// Delay releasing a retired provider while an active/retired dependent still
+// owns a binding to it. This is dlclose-style lifetime retention; its symbols
+// stop participating in new bindings as soon as unload is requested.
+static void dynamic_collect(void) {
+    unsigned retained[DM_NRO_MAX] = {0};
+    for (unsigned i = 0; i < DM_NRO_MAX; i++) retained[i] = g_nro[i].base && !g_nro[i].retiring;
+    int changed;
+    do {
+        changed = 0;
+        for (unsigned i = 0; i < DM_NRO_MAX; i++) {
+            if (!retained[i]) continue;
+            for (unsigned j = 0; j < DM_NRO_MAX; j++)
+                if (!retained[j] && (g_nro[i].dependencies[j / 64] & (1ull << (j % 64)))) {
+                    retained[j] = 1; changed = 1;
+                }
+        }
+    } while (changed);
+    for (unsigned i = 0; i < DM_NRO_MAX; i++)
+        if (g_nro[i].base && g_nro[i].retiring && !retained[i]) dynamic_release(&g_nro[i]);
+}
+
+module_t *dm_nro_load(const dm_nro_catalog_entry *entry) {
+    if (!dm_nro_enabled() || !entry) return NULL;
+    unsigned index;
+    for (index = 0; index < dm_nro_catalog_count; index++) if (entry == &dm_nro_catalog[index]) break;
+    if (index == dm_nro_catalog_count || index >= DM_NRO_MAX) return NULL;
+    dm_nro_lock();
+    module_t *m = &g_nro[index];
+    if (m->base) { dm_nro_unlock(); return NULL; }
+    if (strlen(entry->name) != 8 || entry->name[0] != 'n' || strspn(entry->name + 1, "0123456789abcdef") != 7) {
+        dm_nro_unlock(); return NULL;
+    }
+    strlcpy(m->name, entry->name, sizeof m->name);
+    m->dynamic = m->active = 1; m->load_serial = ++g_load_serial; m->nro_catalog = entry;
+    read_layout(m, g_module_dir);
+    map_image(m, g_module_dir);
+    parse_dynamic(m);
+    if (!nro_deferred_validate(m)) { dynamic_release(m); dm_nro_unlock(); return NULL; }
+    register_gates(m, g_module_dir);
+    if (!relocate(m)) { dynamic_release(m); dm_nro_unlock(); return NULL; }
+    // Preserve SDK inline Module accessors with a genuine SDK-shaped object.
+    // The SDK helper only fills dynamic metadata. It neither maps nor relocates
+    // code; the native loader remains the owner of those operations.
+    uint32_t mod0 = *(uint32_t *)(m->base + 4);
+    int64_t object_offset = (int64_t)mod0 + *(int32_t *)(m->base + mod0 + 0x18);
+    typedef void (*initialize_fn)(void *, uintptr_t, size_t, const Elf64_Dyn *, unsigned);
+    initialize_fn initialize = (initialize_fn)guest_sym("_ZN2nn2ro6detail8RoModule10InitializeEmmPKNS1_3Elf5Elf643DynEb");
+    if (!initialize || object_offset < (int64_t)m->data_off || (uint64_t)object_offset + 0xd0 > m->size) {
+        dynamic_release(m); dm_nro_unlock(); return NULL;
+    }
+    m->nro_sdk_object = m->base + object_offset;
+    ((void **)m->nro_sdk_object)[0] = ((void **)m->nro_sdk_object)[1] = m->nro_sdk_object;
+    initialize(m->nro_sdk_object, (uintptr_t)m->base, entry->image_size + entry->bss_size, m->dyn, 0);
+    nro_region *region = calloc(1, sizeof *region);
+    if (!region) { dynamic_release(m); dm_nro_unlock(); return NULL; }
+    region->info = *m;
+    // Snapshots support address/name introspection only, not symbol ownership.
+    region->info.symh = NULL; region->info.nsym = 0;
+    region->next = g_nro_region_history; g_nro_region_history = region;
+    atomic_store_explicit(&g_nro_regions[index], region, memory_order_release);
+    if (atomic_load_explicit(&g_nro_region_count, memory_order_relaxed) <= index)
+        atomic_store_explicit(&g_nro_region_count, index + 1, memory_order_release);
+    if (m->init) ((void (*)(void))(m->base + m->init))();
+    m->initialized = 1;
+    LOG("NRO load %s base %p size %#zx", m->name, m->base, m->size);
+    dm_nro_unlock();
+    return m;
+}
+
+int dm_nro_commit(module_t *m) {
+    dm_nro_lock();
+    if (!m || m < g_nro || m >= g_nro + DM_NRO_MAX || !m->active || !m->initialized || m->retiring || m->committed) {
+        dm_nro_unlock(); return 0;
+    }
+    // h_ro_LoadModule has now published the SDK public Module fields. All
+    // constructors, including recursive loads, finished before these slots move.
+    m->committed = 1; nro_deferred_publish(m, 1);
+    dm_nro_unlock(); return 1;
+}
+
+int dm_nro_unload(module_t *m) {
+    dm_nro_lock();
+    if (!m || m < g_nro || m >= g_nro + DM_NRO_MAX || !m->dynamic || !m->active) {
+        dm_nro_unlock(); return 0;
+    }
+    if (m->committed) { nro_deferred_publish(m, 0); m->committed = 0; }
+    // nn::ro's caller must stop executing a module before unloading it, as on
+    // hardware. Fini runs while its own symbols and providers remain available.
+    if (m->initialized && m->fini) ((void (*)(void))(m->base + m->fini))();
+    m->initialized = m->active = 0; m->retiring = 1;
+    LOG("NRO unload %s", m->name);
+    dynamic_collect();
+    dm_nro_unlock();
+    return 1;
+}
+
+size_t dm_nro_memory_bytes(int bss_only) {
+    size_t bytes = 0; dm_nro_lock();
+    for (unsigned i = 0; i < DM_NRO_MAX; i++) if (g_nro[i].base) {
+        module_t *m = &g_nro[i];
+        bytes += bss_only ? (m->patch_off < 0 ? m->size - m->file_image_len : 0) : m->size;
+    }
+    dm_nro_unlock(); return bytes;
 }

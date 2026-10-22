@@ -96,6 +96,8 @@ def header(g):
     fg = g.get('frame_generation', 'off')   # optional 60 Hz simulation / 120 Hz color interpolation; never changes the engine timestep
     if fg not in ('off', '2x'): sys.exit(f'{g.id}: frame_generation must be off or 2x: {fg}')
     cloud = g.get('cloud_container', '')   # opt-in private CloudKit container; no cloud access for other profiles
+    eva = g.get('extended_virtual_addressing', 'off')
+    if eva not in ('on', 'off'): sys.exit(f'{g.id}: extended_virtual_addressing must be on or off: {eva}')
     if cloud and not re.fullmatch(r'iCloud\.[A-Za-z0-9][A-Za-z0-9.-]+', cloud): sys.exit(f'{g.id}: invalid cloud_container: {cloud}')
     required = g.words('cloud_required_files', '')
     if any(not re.fullmatch(r'[A-Za-z0-9_./-]+', p) or p.startswith('/') or any(c in ('.', '..', '') for c in p.split('/')) for p in required): sys.exit(f'{g.id}: invalid cloud_required_files: {required}')
@@ -107,6 +109,8 @@ def header(g):
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3)
     if pl not in ('simple', 'full'): sys.exit(f'{g.id}: pad_layout must be simple or full: {pl}')
+    lp = g.get('local_players', '1')
+    if lp not in tuple(map(str, range(1, 9))): sys.exit(f'{g.id}: local_players must be an integer from 1 to 8: {lp}')
     da = g.get('display_aspect', '16:9')   # output geometry after a matching game projection / layout correction; changing only the front end stretches the picture
     if not re.fullmatch(r'[1-9][0-9]*:[1-9][0-9]*', da): sys.exit(f'{g.id}: display_aspect must be positive width:height: {da}')
     daw, dah = map(int, da.split(':'))
@@ -158,9 +162,11 @@ def header(g):
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
          f'#define DM_GAME_FRAME_GENERATION {int(fg == "2x")}',
          f'#define DM_GAME_CLOUD_CONTAINER {q(cloud)}',
+         f'#define DM_GAME_EXTENDED_VIRTUAL_ADDRESSING {int(eva == "on")}',
          f'#define DM_GAME_CLOUD_REQUIRED_FILES {q(" ".join(required))}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_FULL {int(pl == "full")}',
+         f'#define DM_GAME_LOCAL_PLAYERS {int(lp)}',
          f'#define DM_GAME_DISPLAY_ASPECT ({daw}.0 / {dah}.0)',
          f'#define DM_GAME_PRESENT_ASPECT ' + (f'({daw}.0 / {dah}.0)' if g.values('display_aspect') else '0.0'),
          f'#define DM_GAME_OPMODE {int(om == "console")}',
