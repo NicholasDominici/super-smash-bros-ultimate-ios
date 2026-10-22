@@ -39,7 +39,7 @@ GUARD_SITES = {'0x1750dd0': ('21', 'd10203ff'), '0x4def24': ('22', 'f9407660'), 
 SLOT_KINDS = {'cbuf', 'samp', 'samp_tex', 'tex', 'img', 'tbuf', 'sbuf', 'ubo_ptr', 'sbuf_ubo', 'tex_ubo', 'samp_ubo', 'samp_id'}
 CAPTURE_SOURCE_REQUIRED = {'dm/host/Makefile', 'dm/host/main.c', 'dm/host/loader.c', 'dm/host/hle.c',
                            'dm/host/hle_hid.c', 'dm/gfx/nvn/hle_nvn.c', 'dm/gfx/nvn/nvn_mtl.m',
-                           'dm/tools/patch_nso.py', 'dm/tools/a64_tables.py', 'dm/tools/a64_observers.py',
+                           'dm/tools/patch_nso.py', 'dm/tools/a64_tables.py', 'dm/tools/a64_observers.py', 'dm/tools/smash_address_space.py',
                            'dm/gfx/metal/Makefile', 'dm/games/game.py'}
 MENU_CAPTURE_SCRIPT = ','.join(f'{second}:A' for second in range(5, 30, 3))
 # Register-all can change menu timing. Keep confirming before selecting a fighter;
@@ -288,6 +288,11 @@ def verify_rewritten(directory: Path, original_nros: Path, extraction: dict) -> 
     if any(sites.get(offset) != pair for offset, pair in GUARD_SITES.items()):
         raise ValueError('Rewritten main lacks the current exact-build Smash guard observers; omit --rewritten')
     names = smash_nro.catalog_names(directory)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('smash_address_space', REPO / 'dm/tools/smash_address_space.py')
+    arena = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(arena)
+    arena.check_rewritten(directory)
     catalog = json.loads((directory / 'nro_catalog.json').read_text())
     original = {sha(path) for path in original_nros.glob('*.nro')}
     if catalog.get('format') != smash_nro.CATALOG_FORMAT or catalog.get('title_id') != TITLE or len(names) != 98 or {entry['sha256'] for entry in catalog['modules']} != original:

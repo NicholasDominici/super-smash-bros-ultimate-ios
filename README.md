@@ -23,6 +23,8 @@ game, executable game modules, shaders, keys, saves or installable game IPA.
 - A native iOS runtime and Metal shader build path, including Smash's dynamically
   loaded fighter modules and targeted SSBH, UI and effect-shader extraction from
   `data.arc`.
+- An automatic, exact-version virtual-arena compatibility patch for the iPad
+  address-space budget. Your original game files remain unchanged.
 - **Two local players on one device**, using independent compatible extended
   gamepads. Mixed controller models are supported by the adapter.
 - The game's authored left/right vibration, routed to the correct controller.

@@ -15,6 +15,7 @@ import lz4.block
 from capstone import *
 from a64_tables import table_base
 from a64_observers import is_call
+from smash_address_space import apply_original as smash_address_space_cut
 
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 d = open(src, 'rb').read()
@@ -215,6 +216,7 @@ OBS = {
   ],
 }
 BUILD_ID = d[0x40:0x50].hex()
+arena_cuts = smash_address_space_cut(d, IMG, NAME)
 OBS_PREV = {off: struct.unpack_from('<I', IMG, off - 4)[0]
             for off, *_ in OBS.get(BUILD_ID, []) if off >= 4}
 cuts = list(CUTS.get(BUILD_ID, []))
@@ -222,6 +224,7 @@ for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
     IMG[off:off + len(nb)] = nb
+cuts += arena_cuts
 # Key page indices are fixed; the key page content is written by the loader as "actual key number × 8".
 KEYS = {'K18': 508, 'KTLS': 509, 'KTLR': 510, 'KGATE': 511}
 KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE'))}
@@ -1138,7 +1141,9 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:
-    f.write(hashlib.sha256(open(os.path.abspath(__file__), 'rb').read()).hexdigest() + '  patch_nso.py\n')
+    for source_name in ('patch_nso.py', 'a64_tables.py', 'a64_observers.py', 'smash_address_space.py'):
+        source_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), source_name)
+        f.write(hashlib.sha256(open(source_path, 'rb').read()).hexdigest() + '  ' + source_name + '\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file

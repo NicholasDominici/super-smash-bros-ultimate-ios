@@ -1,4 +1,4 @@
-# Super Smash Bros. Ultimate 13.0.5. Bring-up profile; gameplay is not yet validated.
+# Super Smash Bros. Ultimate 13.0.5. Physical iPad gameplay remains unverified.
 # Identity/builds measured from the player's base XCI plus cumulative update.
 title_id	01006A800016E000
 program_id	01006A800016E000
@@ -21,11 +21,14 @@ shader_versions	v2031616
 modules	main subsdk0 sdk
 romfs_marker	data.arc
 zip_store	.arc:.nrr:.metallib
-# Main's allocator reserves 0xf80000000 (62 GiB) of virtual address space at
-# main+0x37c9a58. This is sparse address space, not resident physical memory.
-# Leave room for SDK address-region bookkeeping plus the normal physical heap.
-mem_reserve	0x1100000000
-mem_alias	0x1000000000
+# The exact-build offline patch gives main a 30 GiB sparse virtual arena, with
+# its matching metadata and end bounds. The SDK also needs its ~1 GiB prefix
+# and up to 1 GiB placement alignment inside the 32 GiB alias region.
+# A physical iPad accepts this 36 GiB host reservation; the original 68 GiB
+# reservation fails even with Extended Virtual Addressing. Physical app_pool
+# and the 3.5 GiB host heap capacity are unchanged.
+mem_reserve	0x900000000
+mem_alias	0x800000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 shader_groups	/data.arc=arc /render/=render

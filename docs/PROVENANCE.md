@@ -12,6 +12,10 @@ Smash additions include its exact-build profile, native NRO catalog/loading,
 bounded targeted ARC and SSBH shader preparation, two-player controller routing,
 verified per-player shield observations, extended-addressing signing policy and
 an external player build workflow. Native authored vibration remains the baseline.
+An exact-build offline arena patch adapts the original virtual reservation and
+its matching metadata/bounds to the iPad address-space budget. It operates only
+on private rewritten output, with original identity and instruction gates; the
+source contains compatibility metadata rather than rewritten game modules.
 The shared cloud coordinator is inherited and configured with a separate game
 record ID and an opt-in builder-owned container. Actual Smash cloud delivery
 and physical gameplay still need verification; see VALIDATION.md.

@@ -19,8 +19,13 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   fighters and item effects, with no rendering errors, pipeline-link errors,
   missing keys, unresolved factories or descriptor-pool overflows. It exited
   normally and its recorded inputs/source/profile/host identities stayed
-  unchanged. These are scripted Mac results, not physical iPad or
-  two-human-controller results.
+  unchanged. A later 85-second Final Destination combat run uses the new
+  30 GiB game arena and 36 GiB host window, reaches damage and knockouts,
+  and exits normally with unchanged identities. It has no pipeline-link errors,
+  missing keys, unresolved calls or pool overflows, but reports one cube-versus-2D
+  texture mismatch; the renderer substitutes its zero cube. That run is not a
+  clean rendering acceptance result, and the affected effect is under review.
+  These are scripted Mac results, not physical iPad or two-human-controller results.
 - Fighter script imports are now bound to catalog-verified native providers
   when their NROs finish loading. Before this fix, matches could render while
   both fighters remained frozen at startup placeholders. Strong unresolved
@@ -124,6 +129,19 @@ The large sparse address reservation requires Extended Virtual Addressing in
 addition to Increased Memory Limit. It is not a physical RAM allocation or a
 guarantee that every iOS 26+ device can run the game.
 
+A signed startup probe on the M5 iPad Pro accepts individual reservations up
+to 64 GiB but rejects the original 68 GiB request with `ENOMEM`. Holding a
+64 GiB alias reservation also prevents the separate 3.5 GiB heap reservation.
+Both memory entitlements are present in the signature and provisioning profile;
+available disk storage is a separate issue. A 36 GiB reservation succeeds on
+that device. The profile now uses that smaller host window with a 32 GiB alias
+region; the exact-build rewrite must adapt the game's corresponding arena and
+all its bookkeeping together. That exact-build rewrite now passes original
+identity and instruction gates, atomic rejection tests, independent disassembly
+review and the bounded Mac combat run described above. The physical application pool and host heap
+capacity remain unchanged. A successful address-space probe does not establish
+gameplay or device memory/performance behavior.
+
 ## Build acceptance
 
 `tools/smash.py` does not interpret a shader command's zero exit status as
@@ -184,7 +202,7 @@ python3 tools/audit_repo.py
 The source suite covers configuration/signing policy, synthetic ARC/SSBH parsing,
 NRO catalog/loader policy, input/feedback isolation and lifecycle, verified
 observation guards, inherited presentation checks, save-archive integrity and
-CloudKit coordination. The current run passes 108 Python tests plus native,
+CloudKit coordination. The current run passes 113 Python tests plus native,
 sanitizer, archive and 17 cloud-coordinator scenarios (153 checks). It uses no
 game files, accounts or devices. The audit
 checks staged Git blobs for excluded game/signing/private artifacts and pinned

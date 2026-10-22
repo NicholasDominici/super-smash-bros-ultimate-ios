@@ -33,6 +33,11 @@ README.md, and keep flags/examples synchronized with the actual tools.
   Record Smash module hashes and build IDs before adding observers.
   Address-based changes fail closed on
   different builds and expected instruction bytes. Do not weaken those gates.
+- The Smash virtual-arena compatibility patch is a complete group: reservation,
+  metadata cursor/base, free-unit count and every arena-end bound. Preserve all
+  original-byte gates and the unchanged physical memory pool. Reject old-layout
+  rewritten reuse; never shrink only the initial allocation request. Keep the
+  30 GiB arena consistent with the 32 GiB alias/36 GiB host profile.
 - Per-game values belong in dm/games/<title-id>/game.tsv. Display camera and HUD
   must be corrected together. iPad and iPhone preparation must not mutate inputs.
 - Preserve 60 Hz simulation. Generated 120 FPS presentation is optional and must

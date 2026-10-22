@@ -27,6 +27,17 @@ or update. Renaming files cannot bypass the original-module checks.
 These are identity metadata, not copies of executable game code. Other builds
 are rejected. Do not weaken the gate to accept another version.
 
+The offline rewrite also adapts this exact main executable's sparse virtual
+arena from 62 GiB to 30 GiB. It checks the original file hash, build ID and the
+complete group of size, metadata and end-bound instructions before changing a
+private decompressed copy. The 64 KiB allocation units and 14 MiB metadata
+allowance stay intact. The source profile uses a 36 GiB host window containing
+a 32 GiB alias region; physical application memory and heap capacity are
+unchanged. This is automatic: supply the original files without prepatching
+them. Reused rewritten modules from the old layout are rejected and must be
+regenerated. Device probes and gameplay qualification are separate; see
+[VALIDATION.md](VALIDATION.md).
+
 ## Already merged files
 
 The same complete, integrity-checked merged extraction can be supplied as:
