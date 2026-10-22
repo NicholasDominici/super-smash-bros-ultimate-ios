@@ -119,6 +119,17 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   unresolved-call or descriptor-pool errors, and all producer identities remain
   unchanged. The corrected iOS app passes compilation and resource validation.
   These checks do not replace the pending physical comparison.
+- A diagnostic iPad restart with Metal API validation enabled passed the early
+  display path but later stopped on an invalid encoder-local copy barrier.
+  Its early screenshot readbacks alter submission timing, so that is not a
+  clean comparison for the first-display fault. The copy encoder used
+  `MTLStageAll`, which includes stages that a compute encoder cannot encode;
+  its local barrier now uses Blit-to-Blit for its copy/fill operations. Queue
+  barriers retain their separate, valid `MTLStageAll` semantics. Independent
+  review is clear. A new 85-second Mac match with Metal API validation explicitly
+  enabled exits normally with unchanged identities and no reported rendering,
+  pipeline, factory or pool errors. The combined iOS app compiles and validates;
+  a fresh physical comparison without those diagnostics remains pending.
 - A real disposable Mac match created a five-file save; production save-archive
   capture, encode, decode and restore preserved its exact digest in a new
   private directory. This validates that actual file set and codec, not iCloud

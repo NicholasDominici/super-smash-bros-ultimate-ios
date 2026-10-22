@@ -9,8 +9,9 @@ runtime JIT or jailbreak requirement.
 **This is a bring-up project.** Native Mac tests demonstrate movement, jumps,
 attacks, CPU combat, damage and knockouts. The signed iPad app installs, boots
 and uploads its first committed save to iCloud. Its first display submissions
-hit a GPU address fault, so physical gameplay is not yet qualified. A display
-residency fix is implemented; its physical comparison remains pending. One known
+hit a GPU address fault, so physical gameplay is not yet qualified. Display
+residency and copy-barrier fixes are implemented; their physical comparison
+remains pending. One known
 geometry shader remains unsupported. Two-controller matches, controller feel,
 sustained performance and iCloud handoffs still need device tests. Read
 [the current limits](docs/VALIDATION.md) before spending time on a build.
