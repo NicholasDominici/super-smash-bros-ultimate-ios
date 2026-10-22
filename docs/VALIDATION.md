@@ -24,7 +24,8 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   and exits normally with unchanged identities. It has no pipeline-link errors,
   missing keys, unresolved calls or pool overflows, but reports one cube-versus-2D
   texture mismatch; the renderer substitutes its zero cube. That run is not a
-  clean rendering acceptance result, and the affected effect is under review.
+  clean rendering acceptance result. The same fallback was observed before
+  the arena change; the affected shader/binding and visual effect remain unresolved.
   These are scripted Mac results, not physical iPad or two-human-controller results.
 - Fighter script imports are now bound to catalog-verified native providers
   when their NROs finish loading. Before this fix, matches could render while
@@ -103,10 +104,10 @@ Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
   static shader cache. Its unsigned iOS app passes resource/product validation
   with background CloudKit enabled. The current runtime build includes the
   deferred-import and composite-lifetime fixes and regenerated format-2 catalog.
-  An earlier build passed
-  signing with an exact-app Extended Virtual Addressing/CloudKit profile; that
-  signature does not establish latest-code installation or gameplay. A fresh
-  package-to-install run and physical gameplay remain separate checks.
+  The rebuilt 36 GiB-host package also passes signing with an exact-app
+  Extended Virtual Addressing, Increased Memory Limit and CloudKit profile.
+  That signature does not establish installation or gameplay; those physical
+  checks remain pending.
 - A real disposable Mac match created a five-file save; production save-archive
   capture, encode, decode and restore preserved its exact digest in a new
   private directory. This validates that actual file set and codec, not iCloud

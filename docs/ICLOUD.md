@@ -30,7 +30,7 @@ Do not infer them from the Odyssey port's earlier tests or from successful signi
    capabilities and the device. Use `--profile` if automatic provisioning fails.
 5. Sign both devices into the same iCloud account. Back up their local save
    folders before testing. Start the device with current progress, save in-game
-   and leave it running with a connection until `Documents/cloud-save/status.json`
+   and leave it running with a connection until `Documents/iCloudSync/status.json`
    acknowledges the local digest. Then fully close it before opening the other.
 6. Verify the second device imports the same digest before boot and loads the
    expected progress. Test the return direction separately. A queued upload or
