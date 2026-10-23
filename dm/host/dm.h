@@ -100,7 +100,10 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
 enum { OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20,
        OBS_SMASH_MAP_CONTROLS = 21, OBS_SMASH_STATUS_COMMITTED = 22,
        OBS_SMASH_CONTROL_HEARTBEAT = 23, OBS_SMASH_UI_PROJECTION = 24,
-       OBS_SMASH_UI_DRAW = 25, OBS_MAX = 26 };
+       OBS_SMASH_UI_DRAW = 25, OBS_SMASH_CAMERA_UPDATE = 26,
+       OBS_SMASH_UI_CALCULATE = 27, OBS_SMASH_UI_CALCULATED = 28,
+       OBS_SMASH_PANE_LOCAL_DONE = 29, OBS_SMASH_PANE_USER_DONE = 30,
+       OBS_MAX = 31 };
 void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
 int gate_obs_present(int id);
 uint64_t now_ns(void);

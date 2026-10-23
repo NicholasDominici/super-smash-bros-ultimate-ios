@@ -105,6 +105,8 @@ with open(sys.argv[1], 'wb') as f:
     plistlib.dump({'BundleIdentifier': os.environ['DM_BUNDLE_ID'],
                   'CloudContainer': profile.get('cloud_container', ''),
                   'RequiresExtendedVirtualAddressing': profile.get('extended_virtual_addressing', 'off') == 'on',
+                  **({'DynamicDisplayPolicy': 'smash-narrow-4:3', 'PreparedDisplayAspect': '4:3'}
+                     if profile.get('smash_live_display','off')=='on' else {}),
                   'GameTitleID': profile.id}, f)
 PYNATIVE
 [ $? -eq 0 ] || die "record compiled profile"

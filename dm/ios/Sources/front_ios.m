@@ -11,18 +11,29 @@
 #include "game_profile.h"
 #import "DmControllerFeedback.h"
 #import "DmCloudSave.h"
+#import "DmFPSOverlay.h"
+#include "dm_display_geometry.h"
+#include "smash_display.h"
 
 UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_reset(void);
+void dm_gamepad_geometry_changed(void);
+void mtl_present_geometry_changed(void); // Nonblocking epoch reset; never drains GPU on UIKit.
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
 
 static CAMetalLayer *g_layer;
+static __weak UIView *g_scene_root;
+void front_ios_display_geometry_changed(void){
+    dispatch_async(dispatch_get_main_queue(),^{[g_scene_root setNeedsLayout];dm_gamepad_geometry_changed();});
+}
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
-static UILabel *front_ios_fps_label(void);
+static DmFPSOverlay *front_ios_fps_overlay(void);
 
-@interface DmGameView : UIView
+@interface DmGameView : UIView {
+    dm_display_geometry _drawableGeometry;
+}
 @end
 @implementation DmGameView
 + (Class)layerClass { return CAMetalLayer.class; }
@@ -30,28 +41,44 @@ static UILabel *front_ios_fps_label(void);
     if ((self = [super initWithFrame:f])) {
         CAMetalLayer *l = (CAMetalLayer *)self.layer;
         l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        l.contentsScale = UIScreen.mainScreen.nativeScale; l.framebufferOnly = NO; l.opaque = YES;
+        l.framebufferOnly = NO; l.opaque = YES;
         self.backgroundColor = UIColor.blackColor;
     }
     return self;
 }
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    [self setNeedsLayout];
+}
 - (void)layoutSubviews {
     [super layoutSubviews];
+    double width = self.bounds.size.width, height = self.bounds.size.height;
+    if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0) return;
+    // During a fold/scene transition UIKit can briefly report empty bounds or
+    // detach the window. Keep the last valid drawable instead of allocating 0x0.
+    dm_display_geometry next = dm_display_make(width, height, self.window.screen.nativeScale, width / height);
+    if (!next.valid) return;
+    if (!dm_display_drawable_changed(_drawableGeometry, next)) return;
+    mtl_present_geometry_changed();
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
-    l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    l.contentsScale = next.scale;
+    l.drawableSize = CGSizeMake(next.pixel_width, next.pixel_height);
+    _drawableGeometry = next;
+    dm_gamepad_geometry_changed();
 }
 @end
 
 @interface DmRootVC : UIViewController
 @property (nonatomic, strong) DmGameView *game;
 @property (nonatomic, strong) UIView *pad;
-@property (nonatomic, strong) UILabel *fps;
+@property (nonatomic, strong) DmFPSOverlay *fps;
 @property BOOL preparingSave;
 @end
 @implementation DmRootVC
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
+    g_scene_root=self.view;
     front_ios_power_watch();
     if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
@@ -67,19 +94,28 @@ static UILabel *front_ios_fps_label(void);
     self.pad = dm_gamepad_view(self.view.bounds);
     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:self.pad];
-    self.fps = front_ios_fps_label();   // above the pad, which hides while a controller is connected
+    self.fps = front_ios_fps_overlay();   // above the pad, which hides while a controller is connected
     if (self.fps) [self.view addSubview:self.fps];
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    CGFloat w = b.size.width, h = b.size.height, aspect = DM_GAME_DISPLAY_ASPECT;
-    if (w / h > aspect) w = h * aspect; else h = w / aspect;
-    self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
-    if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
-        CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
-        self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 100, 22);
-    }
+    UIWindowScene *windowScene=self.view.window.windowScene;
+    UIEdgeInsets insets=self.view.safeAreaInsets;
+    dm_smash_display_geometry(b.size.width,b.size.height,self.view.window.screen.nativeScale,
+        insets.top,insets.left,insets.bottom,insets.right,(int)windowScene.interfaceOrientation);
+    dm_display_geometry scene = dm_display_make(b.size.width, b.size.height,
+                                                 self.view.window.screen.nativeScale, dm_smash_display_scene_aspect());
+    if (!scene.valid || !isfinite(b.origin.x) || !isfinite(b.origin.y)) return;
+    self.game.frame = CGRectMake(b.origin.x + scene.picture.x, b.origin.y + scene.picture.y, scene.picture.width, scene.picture.height);
+    self.pad.frame = b;
+    [self.pad setNeedsLayout];
+    [self.fps placeInBounds:b safeArea:self.view.safeAreaInsets];
+}
+- (void)viewSafeAreaInsetsDidChange {
+    [super viewSafeAreaInsetsDidChange];
+    [self.view setNeedsLayout];
+    [self.pad setNeedsLayout];
 }
 - (void)viewDidAppear:(BOOL)a {
     [super viewDidAppear:a]; UIApplication.sharedApplication.idleTimerDisabled = YES;
@@ -111,26 +147,17 @@ static void front_ios_power_watch(void) {
     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, NSProcessInfo.processInfo.lowPowerModeEnabled ? "on" : "off");
 }
 
-// Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).
-// On when the IPA was built with it (the NSP script's SHOW_FPS / --show-fps → DMShowFPS in Info.plist); DM_SHOW_FPS=0 / 1 in Documents/env.txt overrides that without a rebuild. NULL when off
+// Count actual displayed frames, with FG only when an interpolated frame was shown.
+// DM_SHOW_FPS / DMShowFPS choose the initial text state; the corner reveal target
+// always exists above the pad, including controller play and hidden text.
 uint64_t mtl_present_count(void);
 uint64_t mtl_framegen_generated_count(void);
-static UILabel *front_ios_fps_label(void) {
+static DmFPSOverlay *front_ios_fps_overlay(void) {
     const char *e = getenv("DM_SHOW_FPS");
-    if (!(e ? atoi(e) != 0 : [[NSBundle.mainBundle objectForInfoDictionaryKey:@"DMShowFPS"] boolValue])) return nil;
-    UILabel *l = [UILabel new];
-    l.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
-    l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; l.layer.cornerRadius = 6; l.layer.masksToBounds = YES; l.userInteractionEnabled = NO;
-    l.text = @"-- fps";
-    __block uint64_t n0 = mtl_present_count(), generated0 = mtl_framegen_generated_count(); __block double t0 = CACurrentMediaTime();
-    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
-        (void)t; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime();
-        uint64_t generated = mtl_framegen_generated_count();
-        if (now - t0 < 1.5) l.text = [NSString stringWithFormat:@"%.0f fps%@", (n - n0) / (now - t0), generated > generated0 ? @" · FG" : @""];   // FG counts actual generated presentations; a background span has no reading
-        n0 = n; generated0 = generated; t0 = now;
-    }];
-    LOG("front end: frame-rate counter on");
-    return l;
+    BOOL visible = e ? atoi(e) != 0 : [[NSBundle.mainBundle objectForInfoDictionaryKey:@"DMShowFPS"] boolValue];
+    return [[DmFPSOverlay alloc] initWithPresentedFrames:^{ return mtl_present_count(); }
+                                       generatedFrames:^{ return mtl_framegen_generated_count(); }
+                                      initiallyVisible:visible];
 }
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }

@@ -115,6 +115,9 @@ def header(g):
     if not re.fullmatch(r'[1-9][0-9]*:[1-9][0-9]*', da): sys.exit(f'{g.id}: display_aspect must be positive width:height: {da}')
     daw, dah = map(int, da.split(':'))
     if not 0.5 <= daw / dah <= 4: sys.exit(f'{g.id}: display_aspect must be between 1:2 and 4:1: {da}')
+    sld = g.get('smash_live_display', 'off')
+    if sld not in ('on','off') or sld=='on' and (g.id!='01006A800016E000' or da!='4:3'):
+        sys.exit(f'{g.id}: smash_live_display requires the receiving Smash4:3 preparation')
     fbs = g.words('feedback_snap', '')   # fragment shader key prefixes whose same-pass feedback sampling gets a snapshot first (nvn_mtl.m fb_prepare); none by default
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in fbs): sys.exit(f'{g.id}: feedback_snap takes fragment shader keys (8-16 lowercase hex digits): {fbs}')
     afr = g.words('alpha_from_red', '')   # fragment shader key prefixes that read single-channel textures mapped (R, 0, 0, 1) with alpha = red (nvn_mtl.m tex_alpha_red); none by default
@@ -169,6 +172,7 @@ def header(g):
          f'#define DM_GAME_LOCAL_PLAYERS {int(lp)}',
          f'#define DM_GAME_DISPLAY_ASPECT ({daw}.0 / {dah}.0)',
          f'#define DM_GAME_PRESENT_ASPECT ' + (f'({daw}.0 / {dah}.0)' if g.values('display_aspect') else '0.0'),
+         f'#define DM_GAME_SMASH_LIVE_DISPLAY {int(sld == "on")}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
          f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',

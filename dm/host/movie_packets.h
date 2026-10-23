@@ -1,6 +1,7 @@
 // Retain bytes not yet consumed by a push decoder, independently of input slots.
 #pragma once
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +33,23 @@ static inline int dm_movie_bytes_consume(dm_movie_bytes *bytes, size_t size) {
 static inline void dm_movie_bytes_clear(dm_movie_bytes *bytes) { bytes->size = 0; }
 static inline void dm_movie_bytes_dispose(dm_movie_bytes *bytes) {
     free(bytes->data); *bytes = (dm_movie_bytes){0};
+}
+
+// Decoder output replaces the Buffer range: write at Base, never at Data
+// (Base + the previous range offset). Call the SDK accessors rather than
+// assuming a Buffer layout. A refused copy returns an empty range.
+static inline int dm_movie_write_pcm(void *buffer, const void *pcm, size_t size,
+                                     void *(*base)(const void *),
+                                     size_t (*capacity)(const void *),
+                                     void (*set_range)(void *, int, int)) {
+    if (!buffer) return 0;
+    void *destination = base(buffer);
+    if (!destination || size > INT_MAX || size > capacity(buffer) || (size && !pcm)) {
+        set_range(buffer, 0, 0); return 0;
+    }
+    if (size) memcpy(destination, pcm, size);
+    set_range(buffer, 0, (int)size);
+    return 1;
 }
 
 // Negative-timestamp EOS is the existing shared empty-marker convention.

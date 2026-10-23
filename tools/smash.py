@@ -133,6 +133,14 @@ def verify_extraction(source: Path) -> dict:
     return {'modules': record, 'archive_bytes': arc.stat().st_size, 'nrr_sha256': sorted(sha(p) for p in nrrs)}
 
 
+def display_name() -> str:
+    """Use the title profile's full player-facing name, independently of filenames."""
+    for row in (REPO / 'dm/games' / TITLE / 'game.tsv').read_text().splitlines():
+        if row.startswith('name\t'):
+            return row.split('\t', 1)[1]
+    raise ValueError('Smash profile has no display name')
+
+
 def make_profile(work: Path, cloud: str, frame_generation: bool, display_aspect: str = '16:9') -> Path:
     """Make mutable private tables; never regenerate the public profile in place."""
     if display_aspect not in ('16:9', '4:3'):
@@ -143,6 +151,8 @@ def make_profile(work: Path, cloud: str, frame_generation: bool, display_aspect:
     text = re.sub(r'^cloud_container\t.*\n?', '', path.read_text(), flags=re.M)
     text = re.sub(r'^frame_generation\t.*$', 'frame_generation\t' + ('2x' if frame_generation else 'off'), text, flags=re.M)
     text = re.sub(r'^display_aspect\t.*$', 'display_aspect\t' + display_aspect, text, flags=re.M)
+    text = re.sub(r'^smash_live_display\t.*\n?', '', text, flags=re.M)
+    text += '\nsmash_live_display\t' + ('on' if display_aspect=='4:3' else 'off') + '\n'
     if not re.search(r'^extended_virtual_addressing\ton$', text, re.M):
         raise ValueError('Smash requires the Extended Virtual Addressing profile capability')
     if cloud:
@@ -202,6 +212,18 @@ def prepare_display(source: Path, rewritten: Path, work: Path, env: dict,
     # mutate either the original archive or the helper's admitted output.
     romfs = merge_display_romfs(source / 'RomFS', prepared.romfs, work)
     return prepared.rewritten, romfs, prepared.receipt
+
+
+def prepare_live_display(rewritten: Path, romfs: Path, receipt: Path | None, profile: Path) -> dict | None:
+    """Admit all five receiving gates and generate private shipping UI rules."""
+    if receipt is None:
+        if 'smash_live_display\ton' in (profile/'game.tsv').read_text():
+            raise ValueError('Live display requires the matching4:3 prepared archive')
+        return None
+    sys.path.insert(0,str(REPO/'dm/tools'))
+    from smash_live_aspect import verify_live_rewritten, compile_runtime_header
+    verify_live_rewritten(rewritten)
+    return compile_runtime_header(romfs/'data.arc',receipt,profile/'smash_live_rules.generated.h')
 
 
 def extract_packages(base: Path, update: Path, keys: Path, work: Path, env: dict) -> Path:
@@ -448,7 +470,7 @@ def validate_shaders(profile: Path, ios_root: Path, manifest: Path, chain: str, 
 
 
 def validate_product(output: Path, app_only: bool, source: Path, ios: Path, chain: str, bundle: str, cloud: str,
-                     *, romfs: Path | None = None, aspect_receipt: Path | None = None) -> None:
+                     *, romfs: Path | None = None, aspect_receipt: Path | None = None, live_display: bool = False) -> None:
     """A compiler-only product is not a staged app: verify packaged resources."""
     resources = {'romfs/data.arc': ((romfs or source / 'RomFS') / 'data.arc').stat().st_size}
     check_aspect = None
@@ -486,8 +508,15 @@ def validate_product(output: Path, app_only: bool, source: Path, ios: Path, chai
             if check_aspect:
                 with archive.open(prefix + 'romfs/data.arc') as stream:
                     check_aspect(stream, aspect_receipt)
-    if info.get('CFBundleIdentifier') != bundle or metadata != {
-            'BundleIdentifier': bundle, 'CloudContainer': cloud, 'RequiresExtendedVirtualAddressing': True, 'GameTitleID': TITLE}:
+    if any(info.get(key) != display_name() for key in ('CFBundleDisplayName', 'CFBundleName')):
+        raise ValueError('The built app display name must exactly match the title profile, including spaces')
+    expected_metadata = {'BundleIdentifier': bundle, 'CloudContainer': cloud,
+                         'RequiresExtendedVirtualAddressing': True, 'GameTitleID': TITLE}
+    if live_display:
+        if not aspect_receipt:
+            raise ValueError('Live display metadata requires matching prepared resources')
+        expected_metadata.update(DynamicDisplayPolicy='smash-narrow-4:3', PreparedDisplayAspect='4:3')
+    if info.get('CFBundleIdentifier') != bundle or metadata != expected_metadata:
         raise ValueError('The built app metadata does not match the private game/signing profile')
 
 
@@ -548,7 +577,7 @@ def build_capture_host(profile: Path, rewritten: Path, work: Path, env: dict, jo
     run(['ar', 'rcs', library, *objects], work, 'capture-vp9-library', env)
     host_dir = REPO / 'dm/host'
     sources = [host_dir / name for name in ('main.c', 'loader.c', 'hle.c', 'crash.c', 'probe.c', 'thread.c', 'memstat.m', 'front_mac.m', 'entry.S')]
-    sources += sorted(host_dir.glob('hle_*.c')) + [rewritten / 'nro_catalog.c']
+    sources += sorted(host_dir.glob('hle_*.c')) + sorted(host_dir.glob('hle_*.m')) + [rewritten / 'nro_catalog.c']
     for pattern in ('*.c', 'nvn/*.c', 'nvn/*.m', 'nvn/*.S', 'tex/*.c', 'tex/*.m', 'vk/*.m'):
         sources += sorted((REPO / 'dm/gfx').glob(pattern))
     host = build / 'dmhost'
@@ -921,7 +950,7 @@ def main(argv=None) -> int:
         profile = make_profile(work, args.cloud_container, args.frame_generation == 'on', args.display_aspect)
         env = dict(os.environ, GAME=TITLE, DM_GAME=TITLE, DM_GAMES_DIR=str(profile.parent), DM_GAMES_FIRST='1',
                    DM_ROOT=str(work), WORK=str(work / 'tmp'), J=str(args.jobs), PYTHONDONTWRITEBYTECODE='1',
-                   DM_BUNDLE_ID=args.bundle_id, DM_DISPLAY_NAME='Super Smash Bros. Ultimate', DM_APP_VERSION='13.0.5',
+                   DM_BUNDLE_ID=args.bundle_id, DM_DISPLAY_NAME=display_name(), DM_APP_VERSION='13.0.5',
                    DM_SHOW_FPS='1' if args.show_fps else '0', AOC='', FONT_PY=sys.executable, GFXAPI='nvn',
                    DMSH_CAS=str(work / 'shader/cas'), XLATE_DEBUG='1', XLATE_REDUCED='1', DM_COMPILE_ONLY='0')
         # A previous game's shell environment must not inject captures, assets,
@@ -941,6 +970,7 @@ def main(argv=None) -> int:
                  '--nrr-dir', source / 'RomFS/.nrr', '--rewrite'], work, 'rewrite-98-nros', env)
         verify_rewritten(rewritten, nro_source, extraction)
         rewritten, romfs, aspect_receipt = prepare_display(source, rewritten, work, env, args.display_aspect)
+        live_display = prepare_live_display(rewritten,romfs,aspect_receipt,profile)
         verify_rewritten(rewritten, nro_source, extraction)
         capture_path = paths.get('nvn_shader_capture')
         capture_record = validate_capture(capture_path, source, nro_source) if capture_path else None
@@ -964,6 +994,7 @@ def main(argv=None) -> int:
                    'profile': str(profile), 'rewritten': str(rewritten), 'shaders': str(ios), 'shader_manifest': str(manifest),
                    'completeness': completeness, 'capture': capture_record, 'source_manifests': source_manifests,
                    'display_aspect': args.display_aspect, 'display_preparation': str(aspect_receipt) if aspect_receipt else None,
+                   'live_display_preparation':live_display,
                    'cloud_enabled': bool(args.cloud_container), 'app_built': False}
         if not args.prepare_only:
             release_preparation_scratch(work)
@@ -972,7 +1003,7 @@ def main(argv=None) -> int:
                        DM_APP_ONLY='1' if args.app_only else '0', DM_ICON=str(source / 'icon.jpg'))
             run(['bash', REPO / 'dm/ios/tools/build_ipa.sh', output], work, 'app-build', env)
             validate_product(output, args.app_only, source, ios, chain, args.bundle_id, args.cloud_container,
-                             romfs=romfs, aspect_receipt=aspect_receipt)
+                             romfs=romfs, aspect_receipt=aspect_receipt, live_display=args.display_aspect=='4:3')
             receipt.update(app_built=True, output=str(output))
         (work / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
         print(f'Prepared {completeness["compiled"]:,}/{completeness["expected"]:,} shaders; receipt: {work / "receipt.json"}')

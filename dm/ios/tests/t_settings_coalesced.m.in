@@ -1,0 +1,86 @@
+// Execute the real adapter methods with deterministic synthetic UIEvent history.
+// UIKit delivery itself still needs device testing; this uses no game/device.
+#import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
+#include "dm_touch_controls.h"
+/* ADAPTER_ENUM */
+
+@interface UITouch : NSObject
+@property CGPoint sample;
+- (CGPoint)locationInView:(id)view;
+@end
+@implementation UITouch
+- (CGPoint)locationInView:(id)view { (void)view;return self.sample; }
+@end
+@interface UIEvent : NSObject
+@property(copy) NSArray<UITouch *> *history;
+@property unsigned calls;
+- (NSArray<UITouch *> *)coalescedTouchesForTouch:(UITouch *)touch;
+@end
+@implementation UIEvent
+- (NSArray<UITouch *> *)coalescedTouchesForTouch:(UITouch *)touch { (void)touch;self.calls++;return self.history; }
+@end
+static UITouch *touch(double x,double y) { UITouch *t=[UITouch new];t.sample=CGPointMake(x,y);return t; }
+static CGFloat dist(CGPoint a,CGPoint b) { return hypot(a.x-b.x,a.y-b.y); }
+@interface DmGamepad : NSObject {
+    dm_tc_gear _settingsGesture;
+    UITouch *_settingsTouch,*_stick[2]; CGPoint _stickNow[2],_rCentre;
+    NSMapTable<UITouch *,NSNumber *> *_owner,*_faceOf;
+}
+@property unsigned forwarded;
+- (BOOL)inSettings:(CGPoint)p;
+- (uint64_t)faceAt:(CGPoint)p;
+- (CGFloat)stickR:(int)index;
+- (void)pushGame;
+- (void)recompute;
+- (void)refresh;
+- (void)start:(UITouch *)t origin:(CGPoint)p role:(int)role;
+- (BOOL)ready;
+- (void)checkSettingsMovementForTouch:(UITouch *)touch event:(UIEvent *)event;
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event;
+@end
+@implementation DmGamepad
+- (instancetype)init { if ((self=[super init])) { _owner=[NSMapTable strongToStrongObjectsMapTable];_faceOf=[NSMapTable strongToStrongObjectsMapTable]; }return self; }
+- (BOOL)inSettings:(CGPoint)p { return dm_tc_contains((dm_tc_rect){78,8,44,44},(dm_tc_point){p.x,p.y}); }
+- (uint64_t)faceAt:(CGPoint)p { (void)p;return 0; }
+- (CGFloat)stickR:(int)index { (void)index;return 60; }
+- (void)pushGame { self.forwarded++; }
+- (void)recompute {}
+- (void)refresh {}
+- (void)start:(UITouch *)t origin:(CGPoint)p role:(int)role {
+    [_owner removeAllObjects];[_owner setObject:@(role) forKey:t];_settingsTouch=role==C_SETTINGS?t:nil;self.forwarded=0;
+    dm_tc_gear_begin(&_settingsGesture,(dm_tc_point){p.x,p.y},1000000000,0);
+}
+- (BOOL)ready { CGPoint p=[_settingsTouch locationInView:self];return dm_tc_gear_tap(&_settingsGesture,_settingsGesture.generation,(dm_tc_point){p.x,p.y},(dm_tc_rect){78,8,44,44}); }
+/* MOVEMENT_HELPER */
+/* TOUCHES_MOVED */
+@end
+static unsigned checks,failed;
+static void check(BOOL value,const char *name) { checks++;if (!value) { failed++;fprintf(stderr,"FAIL: %s\n",name); } }
+static void scenario(DmGamepad *pad,NSArray<UITouch *> *samples,CGPoint origin,CGPoint endpoint,BOOL admitted,const char *name) {
+    UITouch *t=touch(endpoint.x,endpoint.y);UIEvent *e=[UIEvent new];e.history=samples;
+    [pad start:t origin:origin role:C_SETTINGS];[pad touchesMoved:[NSSet setWithObject:t] withEvent:e];
+    check([pad ready]==admitted,name);check(e.calls==1,"adapter inspected UIKit coalesced history");
+    check(pad.forwarded==0,"gear history never forwarded to game touch");
+}
+int main(void) { @autoreleasepool {
+    DmGamepad *pad=[DmGamepad new];CGPoint p=CGPointMake(100,30);
+    scenario(pad,nil,p,p,YES,"nil history falls back to endpoint");
+    scenario(pad,@[],p,p,YES,"empty history falls back to endpoint");
+    scenario(pad,@[touch(100,30),touch(113,30),touch(100,30)],p,p,NO,"13pt out-and-back in one event cancels");
+    scenario(pad,@[touch(112,30),touch(100,30)],p,p,YES,"exact12pt history remains valid");
+    scenario(pad,@[touch(112.001,30),touch(100,30)],p,p,NO,"just-over12pt history cancels");
+    scenario(pad,@[touch(110,40),touch(100,30)],p,p,NO,"diagonal historical displacement cancels");
+    scenario(pad,@[touch(NAN,30),touch(100,30)],p,p,NO,"nonfinite historical position cancels");
+    scenario(pad,@[touch(77,30),touch(79,30)],CGPointMake(79,30),CGPointMake(79,30),NO,"history outside gear cancels even below12pt");
+    scenario(pad,@[touch(100,30)],p,CGPointMake(113,30),NO,"latest endpoint still checked");
+    scenario(pad,@[touch(109,30),touch(100,30)],p,p,YES,"in-range history admits tap on release");
+    UITouch *t=touch(100,30);[pad start:t origin:p role:C_SETTINGS];UIEvent *e=[UIEvent new];
+    e.history=@[touch(113,30),touch(100,30)];[pad touchesMoved:[NSSet setWithObject:t] withEvent:e];
+    e.history=@[touch(100,30)];[pad touchesMoved:[NSSet setWithObject:t] withEvent:e];
+    [pad checkSettingsMovementForTouch:t event:nil];
+    check(![pad ready],"later event/release endpoint cannot clear historical block");
+    [pad start:t origin:p role:C_GAME];e.calls=0;[pad touchesMoved:[NSSet setWithObject:t] withEvent:e];
+    check(e.calls==0 && pad.forwarded==1,"ordinary game-touch routing stays unchanged");
+    printf("coalesced settings adapter: %u checks, %u failed\n",checks,failed);return failed!=0;
+}}

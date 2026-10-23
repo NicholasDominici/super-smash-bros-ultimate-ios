@@ -6,19 +6,19 @@ An experimental native Apple Silicon port of **Super Smash Bros. Ultimate
 The game code is rewritten on your Mac and signed into the app; there is no
 runtime JIT or jailbreak requirement.
 
-**This is an experimental port.** A player has played it successfully on an M5
-iPad Pro, and actual completed saves have uploaded to iCloud. Menus and a 4:3
-Kirby/Donkey Kong match render with Metal validation and screenshot diagnostics
-disabled.
-Some scene transitions can trigger a Metal texture-view assertion, which is
-under investigation. First-use shader compilation causes noticeable pauses;
-learned pipeline recipes are retained and preloaded on later launches. A player
-reported a same-content repeat was much smoother, but unseen content can still
-introduce compilation pauses. Intro-movie playback and late tutorial cleanup
-remain unreliable, and one known geometry shader remains unsupported. Two-controller
-matches, controller feel, sustained performance and iCloud handoffs still need
-device tests. Read
-[the current limits](docs/VALIDATION.md) before spending time on a build.
+**This is an experimental port.** On an M5 iPad Pro, a player accepted full-screen
+4:3 proportions, clean intro audio, the FPS hide/reveal corner and gameplay feel.
+A controlled intro/menu run displayed about 120 FPS with generated frames while
+preserving 60 Hz gameplay pacing; this is not a measured match-performance claim.
+Actual completed saves have uploaded to iCloud.
+
+First-use shader compilation can still pause unseen content. Historical scene
+transition texture-view and late tutorial-cleanup failures have not been cleared
+across all content, and one known geometry shader remains unsupported.
+Two-controller matches, new controller-feel regression, sustained performance
+and iCloud handoffs still need device tests. Read the
+[release-readiness scope](docs/RELEASE_READINESS.md) and
+[detailed validation](docs/VALIDATION.md) before spending time on a build.
 
 You provide your own **base-game NSP or XCI, update 13.0.5 NSP, and console
 keys**. This repository contains source, tools and metadata. It contains no
@@ -33,6 +33,11 @@ game, executable game modules, shaders, keys, saves or installable game IPA.
   address-space budget. Your original game files remain unchanged.
 - Optional **4:3 iPad camera and UI preparation** for the supported US-English
   game resources, including animated HUD anchors and nested clipping.
+- **Live paired camera/HUD adaptation** in the 4:3 build for narrow landscape
+  scenes (4:3 through 3:2), with safe-area anchors, touch cancellation and
+  interpolation reset. Standard-match fold/unfold passed an actual Mac gameplay
+  preview; physical Duo execution remains deferred. Unqualified owners and wide
+  scenes use a coherent 4:3 fit; see [display support](docs/NATIVE_ASPECT.md).
 - **Two local players on one device**, using independent compatible extended
   gamepads. Mixed controller models are supported by the adapter.
 - The game's authored left/right vibration, routed to the correct controller.
@@ -43,6 +48,7 @@ game, executable game modules, shaders, keys, saves or installable game IPA.
 - Optional background **iCloud saves**, using your own developer container.
 - An optional generated-frame presentation path; gameplay simulation stays at
   60 Hz. This is not native 120 FPS rendering and is off by default for Smash.
+  See [frame-rate setup and the tap-to-hide FPS corner](docs/FRAME_RATE.md).
 
 These are implementation features, not a claim that every path has passed
 physical gameplay testing. [Controller details](docs/CONTROLLERS.md) and
@@ -51,7 +57,8 @@ physical gameplay testing. [Controller details](docs/CONTROLLERS.md) and
 ## Picture, saves and updates
 
 The default build preserves the game's **16:9 composition**. Use
-`--display-aspect 4:3` for the corrected iPad camera, HUD, menus and clipping.
+`--display-aspect 4:3` for iPad and narrow Duo scenes, including the paired live
+camera/HUD adapter. Keep the default 16:9 build for wide phone composition.
 It prepares private copies of the exact US-English resources and keeps the
 current rendering pixel budget. An installed M5 iPad Pro build renders full-screen
 4:3 menus and a Kirby/Donkey Kong match on Skyworld with normal proportions and

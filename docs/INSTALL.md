@@ -5,6 +5,12 @@ produces an unsigned private app or IPA; `tools/sign_install.py` signs a separat
 copy and installs only when given `--install`. Neither helper deletes or
 launches an installed app.
 
+The visible app title is **Super Smash Bros. Ultimate**, including spaces.
+Both CFBundleDisplayName and CFBundleName use that title; the internal executable
+remains DmIOS. A private `.app` or `.ipa` filename is independent of that title.
+Review [release readiness](RELEASE_READINESS.md) for accepted iPad behavior and
+the remaining compatibility, cloud and multiplayer gates.
+
 For a staged app:
 
 ```sh

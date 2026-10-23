@@ -29,6 +29,7 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: ${DM_DISPLAY_NAME}   # the game name in the base NSP (set by build_ipa.sh)
+        CFBundleName: ${DM_DISPLAY_NAME}          # player-facing fallback; executable/product name stays DmIOS
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleShortVersionString: $(MARKETING_VERSION)
         UILaunchStoryboardName: ""

@@ -1,6 +1,7 @@
 """Player workflow safety checks with synthetic metadata and fake Metal files."""
 from pathlib import Path
 import hashlib
+import importlib.util
 import json
 import datetime
 import plistlib
@@ -10,6 +11,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import zipfile
 from types import SimpleNamespace
 from unittest import mock
 
@@ -231,6 +233,8 @@ class SmashBuilderTests(unittest.TestCase):
         self.assertIn('frame_generation\t2x', (cloud / 'game.tsv').read_text())
         ipad = smash.make_profile(self.root / 'private-ipad', '', False, '4:3')
         self.assertIn('display_aspect\t4:3', (ipad / 'game.tsv').read_text())
+        self.assertIn('smash_live_display\ton',(ipad/'game.tsv').read_text())
+        self.assertIn('smash_live_display\toff',(profile/'game.tsv').read_text())
         self.assertIn('display_aspect\t16:9', (profile / 'game.tsv').read_text())
         with self.assertRaisesRegex(ValueError, 'display aspect'):
             smash.make_profile(self.root / 'invalid-aspect', '', False, '21:9')
@@ -242,6 +246,32 @@ class SmashBuilderTests(unittest.TestCase):
         self.assertEqual(smash.prepare_display(source, cache, work, {}, '16:9'),
                          (cache, source / 'RomFS', None))
         self.assertFalse(work.exists())
+
+    def test_live_display_requires_private_receipt_and_all_receiving_gates(self):
+        profile=smash.make_profile(self.root/'live-profile','',False,'4:3')
+        with self.assertRaisesRegex(ValueError,'matching4:3'):
+            smash.prepare_live_display(self.root/'rewritten',self.root/'romfs',None,profile)
+        verify=mock.Mock();compile_header=mock.Mock(return_value={'header_sha256':'synthetic'})
+        module=SimpleNamespace(verify_live_rewritten=verify,compile_runtime_header=compile_header)
+        with mock.patch.dict(sys.modules,{'smash_live_aspect':module}):
+            result=smash.prepare_live_display(self.root/'rewritten',self.root/'romfs',self.root/'receipt.json',profile)
+        verify.assert_called_once_with(self.root/'rewritten')
+        compile_header.assert_called_once_with(self.root/'romfs/data.arc',self.root/'receipt.json',profile/'smash_live_rules.generated.h')
+        self.assertEqual(result,{'header_sha256':'synthetic'})
+        with mock.patch.dict(sys.modules,{'smash_live_aspect':module}),mock.patch.object(module,'verify_live_rewritten',side_effect=ValueError('bad gate')):
+            with self.assertRaisesRegex(ValueError,'bad gate'):
+                smash.prepare_live_display(self.root/'rewritten',self.root/'romfs',self.root/'receipt.json',profile)
+        self.assertEqual(compile_header.call_count,1)
+
+    def test_shipping_flag_is_emitted_only_for_the_receiving_four_three_profile(self):
+        spec=importlib.util.spec_from_file_location('shipping_profile',ROOT/'dm/games/game.py')
+        game=importlib.util.module_from_spec(spec);spec.loader.exec_module(game)
+        path=smash.make_profile(self.root/'shipping','',False,'4:3')
+        self.assertIn('#define DM_GAME_SMASH_LIVE_DISPLAY 1',game.header(game.Game(path)))
+        text=(path/'game.tsv').read_text()
+        for aspect in ('16:9','3:2'):
+            (path/'game.tsv').write_text(text.replace('display_aspect\t4:3','display_aspect\t'+aspect))
+            with self.assertRaises(SystemExit):game.header(game.Game(path))
 
     def test_display_clone_rejects_linked_resources_before_copying(self):
         source, cache, work = (self.root / name for name in ('game', 'cache', 'new'))
@@ -351,7 +381,8 @@ class SmashBuilderTests(unittest.TestCase):
         self.assertEqual(command[command.index('--smash-effect-shaders') + 1], effects)
         self.assertEqual(result[3]['compiled'], 1)
 
-    def test_staged_app_requires_resources_and_correct_private_metadata(self):
+    def product_fixture(self):
+        """Prepare game-free app resources and normal private build metadata."""
         source = self.root / 'product-source'
         (source / 'RomFS').mkdir(parents=True)
         (source / 'RomFS/data.arc').write_bytes(b'synthetic game archive')
@@ -360,10 +391,15 @@ class SmashBuilderTests(unittest.TestCase):
         (app / 'romfs/data.arc').write_bytes((source / 'RomFS/data.arc').read_bytes())
         import shutil
         shutil.copytree(self.ios.parent, app / 'msl')
-        (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.example.smash'}))
+        (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.example.smash',
+            'CFBundleName': smash.display_name(), 'CFBundleDisplayName': smash.display_name()}))
         metadata = {'BundleIdentifier': 'com.example.smash', 'CloudContainer': '',
                     'RequiresExtendedVirtualAddressing': True, 'GameTitleID': smash.TITLE}
         (app / 'NativeBuild.plist').write_bytes(plistlib.dumps(metadata))
+        return app, source, metadata
+
+    def test_staged_app_requires_resources_and_correct_private_metadata(self):
+        app, source, metadata = self.product_fixture()
         check = lambda: smash.validate_product(app, True, source, self.ios.parent, self.chain, 'com.example.smash', '')
         check()
         metadata['RequiresExtendedVirtualAddressing'] = False
@@ -373,6 +409,50 @@ class SmashBuilderTests(unittest.TestCase):
         (app / 'romfs/data.arc').unlink()
         with self.assertRaisesRegex(ValueError, 'regular file'):
             check()
+
+    def test_live_product_metadata_requires_explicit_preparation_and_policy(self):
+        app,source,metadata=self.product_fixture()
+        receipt=self.root/'synthetic-aspect.json';receipt.write_text('{}')
+        check=lambda:smash.validate_product(app,True,source,self.ios.parent,self.chain,'com.example.smash','',aspect_receipt=receipt,live_display=True)
+        with mock.patch('smash_aspect.check_assets'):
+            with self.assertRaisesRegex(ValueError,'metadata'):check()
+            metadata.update(DynamicDisplayPolicy='smash-narrow-4:3',PreparedDisplayAspect='4:3')
+            (app/'NativeBuild.plist').write_bytes(plistlib.dumps(metadata));check()
+            metadata['CloudContainer']='iCloud.com.wrong.account'
+            (app/'NativeBuild.plist').write_bytes(plistlib.dumps(metadata))
+            with self.assertRaisesRegex(ValueError,'metadata'):check()
+
+    def test_visible_title_preserves_spaces_in_app_and_ipa(self):
+        app, source, _ = self.product_fixture()
+        self.assertEqual(smash.display_name(), 'Super Smash Bros. Ultimate')
+        original = plistlib.loads((app / 'Info.plist').read_bytes())
+        ipa = self.root / 'synthetic.ipa'
+
+        def check_both(expect_error=False):
+            with zipfile.ZipFile(ipa, 'w') as archive:
+                for path in app.rglob('*'):
+                    if path.is_file():
+                        archive.write(path, 'Payload/DmIOS.app/' + path.relative_to(app).as_posix())
+            for path, app_only in ((app, True), (ipa, False)):
+                if expect_error:
+                    with self.assertRaisesRegex(ValueError, 'display name'):
+                        smash.validate_product(path, app_only, source, self.ios.parent, self.chain, 'com.example.smash', '')
+                else:
+                    smash.validate_product(path, app_only, source, self.ios.parent, self.chain, 'com.example.smash', '')
+
+        check_both()
+        for key in ('CFBundleName', 'CFBundleDisplayName'):
+            for bad in (None, '', 'DmIOS', 'SuperSmashBrosUltimate', ' Super Smash Bros. Ultimate'):
+                with self.subTest(key=key, value=bad):
+                    info = dict(original)
+                    if bad is None:
+                        del info[key]
+                    else:
+                        info[key] = bad
+                    (app / 'Info.plist').write_bytes(plistlib.dumps(info))
+                    check_both(expect_error=True)
+        (app / 'Info.plist').write_bytes(plistlib.dumps(original))
+        check_both()
 
     def test_owned_capture_timeout_and_crash_are_distinguished(self):
         log = self.root / 'owned.log'

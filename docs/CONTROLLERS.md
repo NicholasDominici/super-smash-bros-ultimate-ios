@@ -5,6 +5,36 @@ independent extended gamepad. The adapter supports mixed models; features depend
 on the actual controller. Pair controllers in Settings → Bluetooth before
 opening the game. A physical two-controller Smash match is not yet verified.
 
+## Touch controls
+
+The overlay shares Odyssey's fixed left stick, Nintendo face diamond, inward
+D-pad, invisible floating right stick and shoulder columns. Its lighter fills,
+outlines and labels use opacity per shape, keeping the game view fully opaque.
+
+Tap and release the top-centre gear to open Settings. A thumb may stay on
+a gameplay control; opening Settings releases its input. A second gear finger
+or movement over 12 points cancels the tap. Dragging outside the gear, including
+coalesced out-and-back movement, or cancelling the touch also prevents opening.
+Gear touches are consumed without pressing a game button. VoiceOver also provides
+an explicit **Open settings** action. The gear stays visible with a controller
+connected. The D-pad and invisible right stick are always enabled for touch
+play. Obsolete compact-layout preferences remain stored but are ignored.
+Plus/minus remain exposed game buttons. Closing settings,
+rotating, backgrounding or reconnecting clears owned touch input.
+Live bounds, scale and safe-area changes cancel touch/gear ownership too.
+Geometry cancellation does not suspend or reassign paired controllers or stop
+their feedback focus. The shared touch-v6 layout caps control scale by safe width
+for narrow/tall scenes; ordinary landscape phone and iPad layouts are preserved.
+Invalid/empty touch geometry publishes a zero-contact panel state so a previous
+guest touchscreen contact cannot remain latched during the transition.
+
+Settings contains **Gyro**, **Device haptics**, and **Also with controller**.
+These switches are disabled because this Smash build has no device-gyro source
+or built-in device-haptic backend. Supported controller haptics remain active
+with their existing tuning; the disabled switches do not alter them.
+
+This UI iteration needs physical interaction testing after installation.
+
 ## Button layout
 
 The adapter preserves the Switch button positions rather than the printed Xbox
@@ -62,3 +92,9 @@ The app writes private `controller-feedback.json` and per-player diagnostic
 files in Documents. Smash guard counters distinguish observed mappings/statuses
 from trigger commands. Inspect them locally and redact device/account details
 before sharing excerpts. No game or controller log belongs in the repository.
+
+## FPS corner
+
+Tap the small safe-area top-left counter to hide its text, then tap the same
+transparent corner to reveal it. The target stays available with a controller
+and preserves other held touches. See [frame-rate behavior](FRAME_RATE.md).

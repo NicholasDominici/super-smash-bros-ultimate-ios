@@ -4,6 +4,40 @@ This is an **experimental Smash Ultimate port**, with bounded physical iPad
 gameplay evidence and remaining qualification work.
 Do not carry Odyssey or Tears of the Kingdom gameplay claims into this port.
 
+## Live scene geometry
+
+The current frontend supports safe proportional fitting during live window,
+display-scale and safe-area changes. It retains valid drawable state through
+zero/nonfinite transitional bounds, cancels touch ownership without suspending
+physical controllers, and invalidates interpolation history without prematurely
+retiring native GPU/capture tickets. Shared pure tests cover 360 geometry
+transitions and the touch-v6 narrow-scene contract. Source-derived Foundation
+fixtures separately exercise the receiving frontend and concurrent invalidation.
+These tests do not establish UIKit posture delivery, device folding or guest
+gameplay. iPhone Duo full-bleed dynamic camera/HUD correction is unqualified;
+the matched 4:3 preparation uses safe letterboxing in other scene aspects.
+Separately, the actual Smash frontend/touch/FPS UIKit host passed Closed → Open →
+Closed in the Duo 27.1 simulator without restarting its stub guest. Scenes were
+678 × 466 and 951 × 669 points at scale 3, with 1864 × 1398 and 2676 × 2007 fitted
+drawables. FPS hide/reveal, the fixture settings sheet and synthetic two-player
+state invariants passed. This is receiving host evidence; game assets, cloud,
+gyro and feedback were stubbed. Opposite landscape was not qualified.
+
+## Current accepted iPad scope
+
+The player accepted build 17 with clean intro audio, the safe-area FPS hide/reveal
+corner and good Smash gameplay feel. The full-screen 4:3 proportions had already
+been accepted. Controlled intro/menu presentation delivered about 119.996 FPS
+from 60 Hz game pacing with generated frames; this is not a measured match rate.
+The actual SDK reused PCM buffer offsets, confirming the Base/range correction
+applies to real output. No capture/process errors or AudioUnit underruns were
+reported in that controlled run. See [AUDIO.md](AUDIO.md),
+[FRAME_RATE.md](FRAME_RATE.md) and [release gates](RELEASE_READINESS.md).
+
+The observations below are chronological evidence from earlier candidates.
+Historical failures remain visible; they do not override accepted build-17
+scenarios or imply every previously failing scene has been retested.
+
 ## What has evidence
 
 - A player navigated menus and played on an M5 iPad Pro, reporting that gameplay
@@ -220,12 +254,14 @@ account-change and foreground/background behavior still need testing.
 
 The default composition is 16:9. Optional exact-build US-English 4:3 camera,
 HUD and clipping preparation is implemented and passes synthetic and private
-canonical asset checks; physical layout validation remains pending. It retains
-the current physical raster cost. No native iPhone aspect correction is claimed.
+canonical asset checks; bounded iPad layout is physically accepted. It retains
+the current physical raster cost. Live scene fitting preserves those proportions;
+no full-bleed native iPhone/Duo camera or HUD correction is claimed.
 See [NATIVE_ASPECT.md](NATIVE_ASPECT.md). Frame
 interpolation is optional and off by default. It adds displayed frames while
 retaining 60 Hz simulation; it is not native 120 FPS rendering. Its artifacts,
-latency and performance require their own device tests.
+latency and performance require their own device tests beyond the accepted
+controlled intro/menu run and subjective gameplay-feel report above.
 
 The large sparse address reservation requires Extended Virtual Addressing in
 addition to Increased Memory Limit. It is not a physical RAM allocation or a

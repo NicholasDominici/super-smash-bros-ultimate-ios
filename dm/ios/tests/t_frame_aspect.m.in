@@ -1,0 +1,296 @@
+#ifndef DM_TEST_RELAY
+// Synthetic peers execute the current viewport, metadata, history and epoch code.
+#import <Foundation/Foundation.h>
+#include <assert.h>
+#include <stdatomic.h>
+#include <pthread.h>
+#include "nvn_present_viewport.h"
+#include "nvn_frame_geometry.h"
+#include "smash_display.h"
+#undef TARGET_OS_SIMULATOR
+#define TARGET_OS_SIMULATOR 1 // Fixture excludes optional VideoToolbox work, not platform proof.
+#define DM_GAME_PRESENT_ASPECT (4.0/3.0)
+#define MLOG(...) ((void)0)
+typedef struct { double originX,originY,width,height,znear,zfar; } MTLViewport;
+/* VIEWPORT */
+
+@class NVNFGContext;
+@interface NVNFGSurface : NSObject { @public id rgb; void *pixelBuffer; }
+@end
+@implementation NVNFGSurface @end
+static unsigned modelAcquires;
+@interface NVNFGContext : NSObject { @public atomic_bool sessionReady,failed; }
+- (NVNFGSurface *)acquire:(BOOL)midpoint;
+@end
+@implementation NVNFGContext
+- (NVNFGSurface *)acquire:(BOOL)midpoint { assert(midpoint);modelAcquires++;return nil; }
+@end
+@interface NVNFGLease : NSObject
+@property(strong) NVNFGContext *context;
+@property(strong) NVNFGSurface *surface;
+@end
+@implementation NVNFGLease @end
+@interface NVNFrameGenOutput : NSObject
+@property(strong) id texture;
+@property BOOL generated;
+@property uint64_t ticket,gameFrame,epoch,geometryGeneration;
+@property double enqueuedTime,logicalAspect;
+@property(copy) NSData *sourceMetadata;
+@property(strong) NVNFGLease *lease;
+@end
+@implementation NVNFrameGenOutput @end
+@interface NVNFrameGenCapture : NSObject
+@property(strong) NVNFrameGenOutput *sourceOutput;
+@end
+@implementation NVNFrameGenCapture @end
+/* OUTPUT */
+@interface NVNFrameGenerator : NSObject {
+    NVNFrameGenCapture *_previous;
+    atomic_ullong _epoch,_nativeOnly,_poolMisses;
+}
+@property BOOL interpolationEnabled,suspended;
+- (NSArray<NVNFrameGenOutput *> *)processCapture:(NVNFrameGenCapture *)capture;
+@end
+@implementation NVNFrameGenerator
+- (instancetype)init { if((self=[super init])){atomic_init(&_epoch,1);self.interpolationEnabled=YES;}return self; }
+/* PROCESS */
+@end
+
+static NSMutableArray *g_fg_captures,*g_fg_outputs;
+static NVNFrameGenOutput *g_fg_latest;
+static uint64_t g_fg_epoch=1,g_fg_last_native;
+static double g_fg_last_submit,g_fg_last_target,g_fg_refresh;
+static int g_fg_slow,g_fg_have_source_geometry;
+static double g_fg_source_aspect;
+static uint64_t g_fg_source_generation;
+static pthread_cond_t g_pq_cv=PTHREAD_COND_INITIALIZER;
+// Native FIFO/ownership sentinels are deliberately not visible to the helpers.
+static uint64_t g_pq_done=3,g_pq_read=7,g_pq_in=9;
+static int g_pq_inflight=2,g_native_present_busy=1;
+static pthread_mutex_t g_pq_mu=PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int g_present_discard,g_origin_ll;
+static _Atomic uint64_t g_cur_frame;
+static uint64_t g_fence=77;
+static unsigned g_xv_npresent;
+static uint64_t g_xv_present[128];
+static unsigned snapshotReads;
+static dm_smash_display_frame snapshotProvider;
+void dm_smash_display_source_snapshot(dm_smash_display_frame *out) { snapshotReads++;*out=snapshotProvider; }
+static void xv_check(uint64_t serial,int a,int b,const char *label) { (void)serial;(void)a;(void)b;(void)label; }
+static void present_start(void) {}
+static void link_sync(void) {}
+static int link_on(void) { return 0; }
+static void mtl_link_pause(int on) { (void)on; }
+static double CACurrentMediaTime(void) { return 42; }
+typedef struct { uint64_t serial; } tex_t;
+#define PQ 8
+/* PQ_ITEM */
+static pq_item g_pq[PQ];
+/* ENQUEUE */
+/* CAPTURE_DIMENSIONS */
+/* INVALIDATE */
+/* ADMIT_GEOMETRY */
+static NVNFrameGenCapture *capture(NVNFGLease *lease,uint64_t ticket,double aspect,uint64_t generation) {
+    NVNFrameGenCapture *c=[NVNFrameGenCapture new];
+    c.sourceOutput=fg_output(lease,NO,ticket,ticket,ticket/60.0,1,aspect,generation,nil);return c;
+}
+int main(void) { @autoreleasepool {
+    g_fg_captures=[NSMutableArray new];g_fg_outputs=[NSMutableArray new];
+    // The old raster retains OLD geometry after the window changes.
+    double closed=678.0/466,open=951.0/669;
+    MTLViewport old=present_viewport(1600,900,951,669,closed);
+    assert(old.height<669 && old.width==951);
+    MTLViewport current=present_viewport(1600,900,951,669,open);
+    assert(current.originX==0 && current.originY==0 && current.width==951 && current.height==669);
+    // The generic raster-aspect fallback remains available with explicit0.
+    MTLViewport fallback=present_viewport(1600,900,951,669,0);
+    assert(fallback.height<669 && fallback.width==951);
+    uint64_t epoch=fg_admit_geometry_locked(closed,1);assert(epoch==1);
+    for(unsigned i=0;i<1000;i++) {
+        // An external request can invalidate owned history before the queued
+        // old-geometry raster arrives. The source transition still resets again.
+        fg_invalidate_locked();uint64_t requestedEpoch=g_fg_epoch;
+        assert(fg_admit_geometry_locked(g_fg_source_aspect,g_fg_source_generation)==requestedEpoch);
+        [g_fg_captures addObject:@1];[g_fg_outputs addObject:@2];
+        g_fg_latest=[NVNFrameGenOutput new];
+        double aspect=i&1?closed:open;uint64_t generation=i+2;
+        assert(fg_admit_geometry_locked(aspect,generation)==requestedEpoch+1);
+        assert(!g_fg_captures.count && !g_fg_outputs.count && !g_fg_latest);
+        assert(fg_admit_geometry_locked(aspect,generation)==requestedEpoch+1);
+        assert(g_pq_done==3 && g_pq_read==7 && g_pq_in==9 && g_pq_inflight==2 && g_native_present_busy==1);
+    }
+    // Same aspect, different insets/generation is also a history discontinuity.
+    epoch=g_fg_epoch;
+    fg_admit_geometry_locked(g_fg_source_aspect,g_fg_source_generation+1);assert(g_fg_epoch==epoch+1);
+    assert(!nvn_frame_geometry_equal(NAN,1,NAN,1));
+    assert(!nvn_frame_geometry_equal(INFINITY,1,INFINITY,1));
+    assert(!nvn_frame_geometry_equal(-1,1,-1,1));
+    NVNFGSurface *surface=[NVNFGSurface new];surface->rgb=@"native RGB";surface->pixelBuffer=(void *)1;
+    NVNFGContext *context=[NVNFGContext new];atomic_init(&context->sessionReady,true);atomic_init(&context->failed,false);
+    NVNFGLease *lease=[NVNFGLease new];lease.context=context;lease.surface=surface;
+    NVNFrameGenOutput *native=fg_output(lease,NO,3,8,.1,1,closed,41,[@"old-frame" dataUsingEncoding:NSUTF8StringEncoding]);
+    NVNFrameGenOutput *midpoint=fg_output(lease,YES,3,8,.09,1,native.logicalAspect,native.geometryGeneration,native.sourceMetadata);
+    assert(native.texture==surface->rgb && midpoint.texture==surface->rgb);
+    assert(native.logicalAspect==closed && midpoint.logicalAspect==closed && midpoint.geometryGeneration==41);
+    NVNFrameGenerator *model=[NVNFrameGenerator new];
+    [model processCapture:capture(lease,1,closed,1)];assert(modelAcquires==0);
+    [model processCapture:capture(lease,2,closed,2)];assert(modelAcquires==0); // Insets changed.
+    [model processCapture:capture(lease,3,closed,2)];assert(modelAcquires==1);
+    [model processCapture:capture(lease,4,open,2)];assert(modelAcquires==1); // Camera/HUD aspect changed.
+    [model processCapture:capture(lease,5,open,2)];assert(modelAcquires==2);
+    // Exercise the REAL enqueue function, delay capture, then mutate every
+    // latest geometry/diagnostic field. Queue and output bytes remain frozen.
+    tex_t texture={.serial=42};int crop[4]={0,0,1600,900};
+    for(unsigned i=0;i<1000;i++) {
+        snapshotProvider=(dm_smash_display_frame){.geometry={.width=678,.height=466,.scale=3,.aspect=closed,.generation=i+41,.orientation=3},
+            .frame=i+500,.camera_calls=i+9,.camera_generation=i+41,.hud_generation=i+41,
+            .camera_aspect=closed,.hud_aspect=closed,.enabled=1,.camera_enabled=1,.hud_enabled=1,.ui_accepted=8};
+        snapshotProvider.geometry.insets[3]=84;
+        dm_smash_display_frame expected=snapshotProvider;
+        atomic_store(&g_cur_frame,i+500);atomic_store(&g_origin_ll,1);
+        g_pq_done=g_pq_in;unsigned reads=snapshotReads;
+        uint64_t ticket=present_enqueue(&texture,.016,crop,55);
+        assert(snapshotReads==reads+1);
+        pq_item queued=g_pq[(ticket-1)%PQ];
+        snapshotProvider.geometry=(dm_smash_display_geometry_t){.width=951,.height=669,.scale=3,.aspect=open,.generation=999999,.orientation=4};
+        snapshotProvider.camera_aspect=open;snapshotProvider.hud_aspect=open;snapshotProvider.frame=999999;
+        assert(!memcmp(&queued.source,&expected,sizeof expected));
+        assert(queued.logical_aspect==closed && queued.geometry_generation==i+41 && queued.render_fence==77 && queued.ev_val==55 && queued.origin_ll==1);
+        size_t width=0,height=0;assert(relay_capture_dimensions(&queued.source,queued.logical_aspect,&width,&height));
+        assert(width==678 && height==466); // Source point geometry, not latest scene/scale.
+        NSMutableData *bytes=[NSMutableData dataWithBytes:&queued.source length:sizeof queued.source];
+        NVNFrameGenOutput *frozen=fg_output(lease,NO,ticket,queued.frame,.2,1,queued.logical_aspect,queued.geometry_generation,bytes);
+        [bytes resetBytesInRange:NSMakeRange(0,bytes.length)];
+        assert(frozen.sourceMetadata.length==sizeof expected && !memcmp(frozen.sourceMetadata.bytes,&expected,sizeof expected));
+        NVNFrameGenOutput *mid=fg_output(lease,YES,ticket,queued.frame,.19,1,frozen.logicalAspect,frozen.geometryGeneration,frozen.sourceMetadata);
+        assert([mid.sourceMetadata isEqualToData:frozen.sourceMetadata]);
+    }
+    size_t width=0,height=0;assert(!relay_capture_dimensions(&snapshotProvider,NAN,&width,&height));
+    assert(!relay_capture_dimensions(&snapshotProvider,INFINITY,&width,&height));
+    assert(!relay_capture_dimensions(&snapshotProvider,0,&width,&height));
+    puts("PASS: 1000 queued geometry transitions, native ownership, immutable output metadata and actual model geometry discontinuities");
+    return 0;
+} }
+#else
+// CPU-only transport regression: real ingress/parser/JPEG manifest code, fake
+// receiving peers and synthetic pixels. No Metal device, game or Simulator runs.
+#import <Foundation/Foundation.h>
+#include <assert.h>
+#include "hle_smash_relay.m"
+static unsigned received_inputs,virtual_resets,geometry_packets;
+static uint64_t received_buttons;
+static int32_t received_lx,received_ry;
+static int focus_state=-1,audio_state=-1,gfx_state=-1;
+static double last_width,last_right_inset;
+int dm_smash_display_enabled(void) { return 1; }
+int dm_smash_display_geometry(double w,double h,double scale,double top,double left,double bottom,double right,int orientation) {
+    assert(w>0 && h>0 && scale>0 && top>=0 && left>=0 && bottom>=0 && right>=0 && (orientation==3 || orientation==4));
+    geometry_packets++;last_width=w;last_right_inset=right;return 1;
+}
+void dm_input_set(uint64_t buttons,int32_t lx,int32_t ly,int32_t rx,int32_t ry) {
+    (void)ly;(void)rx;received_inputs++;received_buttons=buttons;received_lx=lx;received_ry=ry;
+}
+void dm_input_reset_virtual(void) { virtual_resets++;received_buttons=0;received_lx=received_ry=0; }
+void dm_focus_set(int state) { focus_state=state; }
+void dm_audio_suspend(int state) { audio_state=state; }
+void dm_gfx_suspend(int state) { gfx_state=state; }
+static void write_packet(NSDictionary *packet) {
+    NSData *data=[NSJSONSerialization dataWithJSONObject:packet options:NSJSONWritingSortedKeys error:nil];assert(data);
+    assert([data writeToFile:[relay_directory stringByAppendingPathComponent:@"scene-input.json"] options:NSDataWritingAtomic error:nil]);
+}
+int main(void) { @autoreleasepool {
+    NSString *temporary=[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    assert([NSFileManager.defaultManager createDirectoryAtPath:temporary withIntermediateDirectories:YES attributes:nil error:nil]);
+    relay_directory=temporary;relay_session=@"synthetic-backend";atomic_store(&relay_started,1);
+    NSMutableDictionary *packet=[@{@"schema":@1,@"session":@"synthetic-viewer",@"sequence":@42,
+        @"foreground_active":@YES,@"width":@678,@"height":@466,@"scale":@3,
+        @"safe_insets":@[@0,@0,@34,@84],@"interface_orientation":@3,
+        @"buttons":@2,@"lx":@(-12345),@"ly":@0,@"rx":@0,@"ry":@32767,
+        @"geometry_changes":@7,@"input_changes":@9} mutableCopy];
+    write_packet(packet);relay_tick(100);
+    assert(received_inputs==1 && received_buttons==2 && received_lx==-12345 && received_ry==32767);
+    assert(geometry_packets==1 && last_width==678 && last_right_inset==84 && focus_state==1 && gfx_state==0 && audio_state==0);
+    assert(relay_input_packets==1 && atomic_load(&relay_pending)==1 && atomic_load(&relay_busy)==1);
+    // Re-reading a sequence does not refresh its lease or admit changed payload.
+    packet[@"buttons"]=@1;write_packet(packet);relay_tick(100.249);assert(received_inputs==1 && received_buttons==2);
+    unsigned resets=virtual_resets;relay_tick(100.251);
+    assert(received_inputs==1 && virtual_resets>resets && received_buttons==0 && focus_state==3 && gfx_state==1 && audio_state==1);
+    assert(atomic_load(&relay_foreground)==0 && atomic_load(&relay_pending)==0 && atomic_load(&relay_busy)==0);
+    packet[@"sequence"]=@43;packet[@"foreground_active"]=@NO;write_packet(packet);relay_tick(100.260);
+    assert(received_inputs==1 && received_buttons==0 && focus_state==3);
+    packet[@"sequence"]=@44;packet[@"foreground_active"]=@YES;write_packet(packet);relay_tick(100.270);
+    assert(received_inputs==2 && received_buttons==1 && focus_state==1);
+    assert(atomic_load(&relay_pending)==1 && atomic_load(&relay_busy)==1);
+    // Foreground loss may cancel a pending request, but cannot free a copy
+    // already taken by the renderer: only its completion releases that slot.
+    assert(dm_smash_relay_capture_requested()==1);
+    relay_active(0);assert(atomic_load(&relay_busy)==1);
+    atomic_store(&relay_busy,0);relay_active(1);
+    packet[@"sequence"]=@43;packet[@"buttons"]=@8;write_packet(packet);relay_tick(100.400);assert(received_inputs==2);
+    relay_tick(100.530);assert(received_inputs==2 && received_buttons==0 && focus_state==3);
+    packet[@"session"]=@"restarted-viewer";packet[@"sequence"]=@1;write_packet(packet);relay_tick(100.600);
+    assert(received_inputs==3 && received_buttons==8 && [relay_viewer_session isEqualToString:@"restarted-viewer"] && relay_sequence==1);
+    relay_input parsed;
+    for(unsigned scenario=0;scenario<10;scenario++) {
+        NSMutableDictionary *bad=[packet mutableCopy];
+        if(scenario==0)bad[@"width"]=@(NAN);
+        if(scenario==1)bad[@"scale"]=@(INFINITY);
+        if(scenario==2)bad[@"safe_insets"]=@[@0,@0,@34,@(-1)];
+        if(scenario==3)bad[@"safe_insets"]=@[@0,@0,@466,@0];
+        if(scenario==4)bad[@"safe_insets"]=@[@0,@0,@0];
+        if(scenario==5)bad[@"lx"]=@32768;
+        if(scenario==6)bad[@"ry"]=@1.5;
+        if(scenario==7)bad[@"sequence"]=@"2";
+        if(scenario==8)bad[@"buttons"]=@65536;
+        if(scenario==9)bad[@"interface_orientation"]=@1;
+        assert(!relay_parse(bad,&parsed));
+    }
+    // Queue completion before changing all later state. It must publish the old
+    // source frame, original raw insets and exact completed JPEG as one binding.
+    relay_queue=dispatch_queue_create("smash-relay-cpu-test",DISPATCH_QUEUE_SERIAL);
+    dispatch_semaphore_t gate=dispatch_semaphore_create(0);
+    dispatch_async(relay_queue,^{dispatch_semaphore_wait(gate,DISPATCH_TIME_FOREVER);});
+    const size_t width=678,height=466,row=width*4;
+    NSMutableData *pixels=[NSMutableData dataWithLength:row*height];
+    CGDataProviderRef provider=CGDataProviderCreateWithCFData((__bridge CFDataRef)pixels);
+    CGColorSpaceRef color=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGImageRef image=CGImageCreate(width,height,8,32,row,color,kCGImageAlphaNoneSkipFirst|kCGBitmapByteOrder32Little,provider,NULL,false,kCGRenderingIntentDefault);
+    assert(image);
+    double closed=678.0/466;
+    dm_smash_display_frame source={.geometry={.width=678,.height=466,.scale=3,.aspect=closed,.generation=41,.orientation=3},
+        .frame=55,.camera_calls=80,.camera_generation=41,.hud_generation=41,.camera_aspect=closed,.hud_aspect=closed,
+        .enabled=1,.camera_enabled=1,.hud_enabled=1,.ui_accepted=4,.ui_matrix_calls=12,.ui_matrix_writes=8,.projection_generation=41};
+    source.geometry.insets[2]=34;source.geometry.insets[3]=84;
+    dm_smash_relay_completed(image,&source,77);
+    source.geometry=(dm_smash_display_geometry_t){.width=951,.height=669,.scale=3,.aspect=951.0/669,.generation=42,.orientation=4};
+    source.frame=999;source.camera_aspect=951.0/669;source.hud_generation=42;
+    dispatch_semaphore_signal(gate);dispatch_sync(relay_queue,^{});
+    CGImageRelease(image);CGColorSpaceRelease(color);CGDataProviderRelease(provider);
+    NSData *manifest_data=[NSData dataWithContentsOfFile:[temporary stringByAppendingPathComponent:@"backend.json"]];assert(manifest_data);
+    NSDictionary *manifest=[NSJSONSerialization JSONObjectWithData:manifest_data options:0 error:nil];assert(manifest);
+    NSData *jpeg=[NSData dataWithContentsOfFile:[temporary stringByAppendingPathComponent:@"frame.jpg"]];assert(jpeg.length);
+    assert([manifest[@"frame_sha256"] isEqualToString:relay_sha256(jpeg)]);
+    assert([manifest[@"source_geometry_generation"] unsignedLongLongValue]==41 && [manifest[@"source_frame"] unsignedLongLongValue]==55);
+    assert([manifest[@"width"] unsignedLongLongValue]==678 && [manifest[@"height"] unsignedLongLongValue]==466);
+    assert(fabs([manifest[@"source_aspect"] doubleValue]-closed)<1.e-12);
+    assert(([manifest[@"source_safe_insets"] isEqual:@[@0,@0,@34,@84]]));
+    assert([manifest[@"camera"][@"generation"] unsignedLongLongValue]==41 && [manifest[@"hud"][@"generation"] unsignedLongLongValue]==41);
+    assert([manifest[@"diagnostics"][@"receiving_frame_binding_matches"] boolValue]);
+    assert([manifest[@"diagnostics"][@"ui_matrix_calls"] unsignedLongLongValue]==12);
+    CGImageSourceRef decoded=CGImageSourceCreateWithData((__bridge CFDataRef)jpeg,NULL);assert(decoded);
+    NSDictionary *properties=CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(decoded,0,NULL));
+    assert([properties[(__bridge NSString *)kCGImagePropertyPixelWidth] unsignedLongLongValue]==678);
+    assert([properties[(__bridge NSString *)kCGImagePropertyPixelHeight] unsignedLongLongValue]==466);CFRelease(decoded);
+    assert(relay_images==1 && !atomic_load(&relay_busy));
+    dm_smash_display_frame unavailable={0};unavailable.geometry.aspect=4.0/3;
+    NSDictionary *absent=relay_manifest(&unavailable,88,jpeg,640,480);
+    assert(![absent[@"camera"][@"available"] boolValue] && ![absent[@"hud"][@"available"] boolValue]);
+    assert(![absent[@"diagnostics"][@"source_metadata_available"] boolValue] && ![absent[@"diagnostics"][@"receiving_frame_binding_matches"] boolValue]);
+    atomic_store(&relay_busy,1);dm_smash_relay_completed(NULL,NULL,89);dispatch_sync(relay_queue,^{});
+    assert(relay_capture_failures==1 && !atomic_load(&relay_busy));
+    assert([[NSData dataWithContentsOfFile:[temporary stringByAppendingPathComponent:@"backend.json"]] isEqualToData:manifest_data]);
+    assert([NSFileManager.defaultManager removeItemAtPath:temporary error:nil]);
+    puts("PASS: actual relay fresh-sequence TTL, virtual neutralization, finite bounds, immutable completed frame/JPEG binding and explicit unavailable metadata");
+    return 0;
+} }
+#endif

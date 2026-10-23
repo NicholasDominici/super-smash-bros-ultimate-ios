@@ -87,6 +87,7 @@ static struct {
     void (*set_data)(void *buf, void *data, size_t cap);
     void (*set_range)(void *buf, int off, int size);
     void *(*data)(const void *buf);
+    void *(*base)(const void *buf);
     size_t (*cap)(const void *buf);
     void (*set_i32)(void *md, const char *k, int v);
     void (*set_rect)(void *md, const char *k, int l, int t, int r, int b);
@@ -102,6 +103,7 @@ static void md_syms(void) {
     G.set_data = msym("_ZN5movie6Buffer18SetDataAndCapacityEPvm");
     G.set_range = msym("_ZN5movie6Buffer8SetRangeEii");
     G.data = msym("_ZNK5movie6Buffer4DataEv");
+    G.base = msym("_ZNK5movie6Buffer4BaseEv");
     G.cap = msym("_ZNK5movie6Buffer8CapacityEv");
     G.set_i32 = msym("_ZN5movie9MediaData8SetInt32EPKci");
     G.set_rect = msym("_ZN5movie9MediaData7SetRectEPKciiii");
@@ -683,11 +685,12 @@ HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: ge
     if (!buf || i < 0 || i >= MD_NOUT) return 0x100b;
     if (d->mode == MD_MODE_TEX) return md_out_tex(d, i, buf);
     if (MD_AUDIO(d)) {   // PCM16 interleaved; an output without samples (end of stream) is empty
-        size_t n = d->out[i].pic ? d->out[i].bytes : 0, cap = G.cap(buf); uint8_t *p = G.data(buf);
-        if (!p || cap < n) { LOG("[RED] movie: client audio output buffer is %zu bytes, this packet needs %zu", cap, n); G.set_range(buf, 0, 0); return 0x100b; }
-        if (n) memcpy(p, d->out[i].frm, n);
-        G.set_range(buf, 0, (int)n);
-        MD_TRACE(d, 12, "GetOutputBuffer index %d → PCM %zu bytes", i, n);
+        size_t n = d->out[i].pic ? d->out[i].bytes : 0, cap = G.cap(buf);
+        intptr_t offset = (intptr_t)G.data(buf) - (intptr_t)G.base(buf);
+        if (!dm_movie_write_pcm(buf, d->out[i].frm, n, G.base, G.cap, G.set_range)) {
+            LOG("[RED] movie: client audio output buffer is %zu bytes, this packet needs %zu", cap, n); return 0x100b;
+        }
+        MD_TRACE(d, 12, "GetOutputBuffer index %d → PCM %zu bytes (decoder %p, capacity %zu, replaced offset %lld)", i, n, (void *)d, cap, (long long)offset);
         return 0;
     }
     int w, h, stride, slice; md_dims(d, &w, &h, &stride, &slice);

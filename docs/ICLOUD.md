@@ -50,6 +50,14 @@ to inspect your own private development database; public sharing is not required
 The source preserves complete-commit capture, SHA-256 integrity verification,
 account pinning, compare-and-swap cloud writes, conflict backups and explicit
 conflict choices. A cloud restore never overwrites a mounted live save.
+Failed local journal/state writes now defer synchronization and retain progress.
+Account/ancestry/counters advance only after the state candidate is persisted;
+an already confirmed pending acknowledgement is retried before a newer commit
+is reconciled. The newest journal-blocked snapshot retries on the normal check,
+foreground and startup paths without requiring another game save. A verified
+restored local tree can still start offline while its sync bookkeeping retries.
+These failure paths are exercised with real Foundation files in the coordinator
+harness; they do not certify a real two-device handoff or physical storage failure.
 The Smash profile requires `save_data/system_data.bin` before publishing a
 progress snapshot; the path comes from the original executable. A disposable
 Mac match produced the real five-file save set, which the production archive

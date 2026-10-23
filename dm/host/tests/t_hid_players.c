@@ -110,6 +110,11 @@ int main(void) {
     // Touch is confined to its P1 physical slot and follows assignment swaps.
     dm_input_set(DM_BTN_PLUS,0,0,0,0);
     h_hid_StateFullKey(&state, ids+1); assert(!(state.buttons & DM_BTN_PLUS));
+    dm_input_set(DM_BTN_MINUS,10,20,30,40);dm_input_set(0,0,0,0,0);
+    dm_input_reset_virtual();
+    h_hid_StateFullKey(&state,ids);assert(state.buttons==DM_BTN_A && state.lx==1000);
+    h_hid_StateFullKey(&state,ids+1);assert(state.buttons==DM_BTN_Y && state.lx==123);
+    dm_input_set(DM_BTN_PLUS,0,0,0,0);
     dm_pad_set_assignment_callback(assignment_changed);
     h_hid_Swap(ids, ids+1);
     assert(assignments_changed == 1 && dm_pad_logical_player(0) == 1 && dm_pad_logical_player(1) == 0);

@@ -41,6 +41,9 @@ static uint64_t pack(int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
 }
+void dm_input_reset_virtual(void) {
+    atomic_store(&g_btn,0);atomic_store(&g_axes,0);atomic_store(&g_latch,0);
+}
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
 }

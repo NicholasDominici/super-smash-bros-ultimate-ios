@@ -14,7 +14,8 @@ from itertools import combinations
 import lz4.block
 from capstone import *
 from a64_tables import table_base
-from a64_observers import is_call
+from a64_observers import is_call, require_full_state_gate
+from pathlib import Path
 from smash_address_space import apply_original as smash_address_space_cut
 
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -209,6 +210,11 @@ OBS = {
     (0x6b92c0, 23, 'd101c3ff', 'ControlModule exec heartbeat: expire stale guard effects; orig sub sp,sp,#0x70'),
     (0x44d60, 24, 'f9400428', 'ui2d SetProjection entry: scoped 4:3 owner/caller gate; orig ldr x8,[x1,#8]'),
     (0x378f140, 25, 'f81d0ff5', 'Smash UI DrawInfo per-pass setup: coherent logical 4:3 scissor context; orig str x21,[sp,#-0x30]!'),
+    (0x4ec800, 26, 'd103c3ff', 'live camera update data observer: independently admitted aspect +0x128; orig sub sp,sp,#0xf0'),
+    (0x4b654, 27, 'f9006274', 'Layout Calculate after context construction: x20 layout,x19 DrawInfo,FP-0x48 context; orig str x20,[x19,#0xc0]'),
+    (0x4b674, 28, 'f9400288', 'Layout Calculate immediately after root Calculate, before post-callback: restore borrowed state; orig ldr x8,[x20]'),
+    (0x587c0, 29, '39416268', 'Pane normal global matrix after Local and derived reflow, before children: x19 pane,x21 context; orig ldrb w8,[x19,#0x58]'),
+    (0x588d4, 30, '320003f6', 'Pane authored user/global matrix path before children: x19 pane,x21 context; orig mov w22,#1'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
@@ -217,6 +223,12 @@ OBS = {
     (0x2248e4, 20, '910022d6', 'unlink request posted (loop at main+0x224868, x19 = request ring): wait for the dispatcher before the object is freed; orig add x22, x22, #8'),
   ],
 }
+# This exact receiving internal site has a live w8 across the callback. It is
+# admitted only with independently checked neighboring instructions and the
+# production full-state gate; all other unregistered internal sites still fail.
+INTERNAL_OBS = {'21450c647b8c5940ed5b68218ea128fd': {
+    0x588d4: (30, 0x3d802660, 0x320003f6, 0x35fff7c8),
+}}
 BUILD_ID = d[0x40:0x50].hex()
 arena_cuts = smash_address_space_cut(d, IMG, NAME)
 OBS_PREV = {off: struct.unpack_from('<I', IMG, off - 4)[0]
@@ -807,12 +819,17 @@ obs = list(OBS.get(BUILD_ID, []))
 for off, oid, ow, why in obs:
     w = struct.unpack_from('<I', IMG, off)[0]
     assert f'{w:08x}' == ow, f'observation gate original instruction mismatch {off:#x}: {w:08x}'
-    # Function entries, or the instruction right after BL/BLR, only: dm_gate writes back only x0–x8 / x30, and host C code may modify x9–x17; at entry these carry no values under AAPCS64 (arguments are only in x0–x7 / x8),
-    # and right after a call returns the callee was free to clobber them anyway (x16 / x17 are the veneer registers)
+    # Entry/after-call remain the default. The sole registered internal boundary
+    # additionally requires exact live-neighbor facts and the full-state entry.
     # BLR has already been rewritten into a host-dispatch branch above. Inspect
     # its original word, while preserving the same AAPCS scratch-register rule.
     after_call = off >= 4 and is_call(OBS_PREV[off])
-    assert off in set(starts) or after_call, f'observation gate neither at a function entry nor after a call {off:#x}'
+    internal = INTERNAL_OBS.get(BUILD_ID, {}).get(off)
+    if internal:
+        expected_id, previous, expected, following = internal
+        assert (oid, OBS_PREV[off], w, struct.unpack_from('<I', IMG, off+4)[0]) == (expected_id, previous, expected, following), 'internal observation receiving liveness facts changed'
+        require_full_state_gate((Path(__file__).resolve().parents[1]/'host/entry.S').read_text())
+    assert off in set(starts) or after_call or internal, f'observation gate neither at an admitted entry/call/internal boundary {off:#x}'
     assert off < TEXT_END and off not in kinds and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'observation gate conflicts with a rewrite site {off:#x}'
     put_branch(off, site_obs(off, oid, w)); stat('obs')
 
